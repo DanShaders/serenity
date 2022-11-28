@@ -25,6 +25,7 @@ using NativeWord = u32;
 using DoubleWord = u64;
 using SignedDoubleWord = i64;
 #endif
+static_assert(OneOf<NativeWord, u32, unsigned long, unsigned long long>);
 
 template<bool sign>
 using ConditionallySignedDoubleWord = Conditional<sign, SignedDoubleWord, DoubleWord>;
