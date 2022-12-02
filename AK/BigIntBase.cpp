@@ -68,6 +68,15 @@ constexpr u64 roots_of_unity[] = {
     16334397945464290598ULL,
 };
 
+// clang-format off
+constexpr size_t reversed_bits_64[] = {
+    0, 32, 16, 48, 8,  40, 24, 56, 4, 36, 20, 52, 12, 44, 28, 60,
+    2, 34, 18, 50, 10, 42, 26, 58, 6, 38, 22, 54, 14, 46, 30, 62,
+    1, 33, 17, 49, 9,  41, 25, 57, 5, 37, 21, 53, 13, 45, 29, 61,
+    3, 35, 19, 51, 11, 43, 27, 59, 7, 39, 23, 55, 15, 47, 31, 63,
+};
+// clang-format on
+
 template<typename Func, size_t... shift_categories>
 ALWAYS_INLINE void shift_dispatch(Func func)
 {
@@ -146,17 +155,29 @@ static u64 mod_sub(u64 a, u64 b)
     return a - b + (a < b ? modulus : 0);
 }
 
-template<size_t shift_category = 4>
+template<size_t sc>
 static u64 mod_shift(u64 y, u64 shift)
 {
-    if constexpr (shift_category == 0) {
+    if constexpr (sc == 0) {
         return y;
-    } else if constexpr (shift_category == 1) {
+    } else if constexpr (sc == 1) {
         return mod_reduce(y << shift, y >> (64 - shift), 0);
-    } else if constexpr (shift_category == 2) {
+    } else if constexpr (sc == 2) {
         return mod_reduce(y << shift, static_cast<u32>(y >> (64 - shift)), y >> (96 - shift));
-    } else {
+    } else if constexpr (sc == 3) {
         return mod_reduce(0, y << (shift - 64), y >> (96 - shift));
+    } else if constexpr (sc == 4) {
+        if (shift == 0) {
+            return mod_shift<0>(y, shift);
+        } else if (shift <= 32) {
+            return mod_shift<1>(y, shift);
+        } else if (shift < 64) {
+            return mod_shift<2>(y, shift);
+        } else {
+            return mod_shift<3>(y, shift);
+        }
+    } else {
+        VERIFY_NOT_REACHED();
     }
 }
 
@@ -219,15 +240,6 @@ ALWAYS_INLINE static void ntt_multiply_constant(u64* a, size_t from, size_t to, 
         a[i] = mod_mul(a[i], value);
 }
 
-// clang-format off
-const size_t reversed_bits_64[] = {
-    0, 32, 16, 48, 8,  40, 24, 56, 4, 36, 20, 52, 12, 44, 28, 60,
-    2, 34, 18, 50, 10, 42, 26, 58, 6, 38, 22, 54, 14, 46, 30, 62,
-    1, 33, 17, 49, 9,  41, 25, 57, 5, 37, 21, 53, 13, 45, 29, 61,
-    3, 35, 19, 51, 11, 43, 27, 59, 7, 39, 23, 55, 15, 47, 31, 63,
-};
-// clang-format on
-
 template<SIMD::UnrollingMode unrolling_mode>
 static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
 {
@@ -247,7 +259,7 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
             if (inner_len == 1) {
                 for (size_t i = 0; i < n2; i += parts) {
-                    size_t offset_in_part = reversed_idx[(i & (n - 1)) >> 6] >> 6 & (part_len - 1);
+                    size_t offset_in_part = reversed_idx[(i & (n - 1)) >> 6] >> 6;
                     ntt_multiply_arbitrary<unrolling_mode>(i, i + parts, offset_in_part, a, twiddle_start);
                 }
             } else {
@@ -273,7 +285,7 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
         // Do NTTs of size `parts`
         for (size_t log_len = 0; log_len < inner_iters; ++log_len) {
             size_t total_len = one_sz << (k - outer_log_len - log_len - 1);
-            if (inner_iters - log_len >= 2 && total_len / 2 >= 4) {
+            if (inner_iters - log_len >= 2 && total_len >= 8) {
                 size_t total_len2 = one_sz << (k - outer_log_len - log_len - 2);
 
                 for (size_t i = 0; i < n2; i += 2 * total_len) {
@@ -285,9 +297,30 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
                 ++log_len;
             } else {
-                for (size_t i = 0; i < n2; i += 2 * total_len) {
-                    size_t shift = 3 * (reversed_bits_64[i >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 1) & 63);
-                    ntt_convolve<unrolling_mode>(a, i, total_len, total_len, shift);
+                if (total_len == 2) [[likely]] {
+                    for (size_t i = 0; i < n2; i += 4) {
+                        size_t shift2 = reversed_bits_64[i & 63]; // [0; 16)
+                        size_t shift3 = shift2 + 16;              // [16; 32)
+                        size_t shift1 = shift2 << 1;
+
+                        auto x = a[i], y = mod_shift<4>(a[i + 2], 3 * shift1);
+                        a[i] = mod_add(x, y), a[i + 2] = mod_sub(x, y);
+                        x = a[i + 1], y = mod_shift<4>(a[i + 3], 3 * shift1);
+                        a[i + 1] = mod_add(x, y), a[i + 3] = mod_sub(x, y);
+
+                        x = a[i], y = mod_shift<4>(a[i + 1], 3 * shift2);
+                        a[i] = mod_add(x, y), a[i + 1] = mod_sub(x, y);
+
+                        x = a[i + 2], y = mod_shift<4>(a[i + 3], 3 * shift3);
+                        a[i + 2] = mod_add(x, y), a[i + 3] = mod_sub(x, y);
+                    }
+                    ++log_len;
+                } else {
+                    // This should not be reachable at all for sufficiently large k (kept for debug purposes)
+                    for (size_t i = 0; i < n2; i += 2 * total_len) {
+                        size_t shift = 3 * (reversed_bits_64[i >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 1) & 63);
+                        ntt_convolve<unrolling_mode>(a, i, total_len, total_len, shift);
+                    }
                 }
             }
         }
