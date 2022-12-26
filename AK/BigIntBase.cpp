@@ -8,6 +8,126 @@
 #include <AK/SIMD.h>
 #include <AK/UFixedBigInt.h>
 
+#define LIBMP_DEBUG_PROFILING
+
+#ifdef LIBMP_DEBUG_PROFILING
+#    include <AK/OwnPtr.h>
+#    include <AK/ScopeGuard.h>
+#    include <AK/String.h>
+#    include <AK/Time.h>
+#    include <AK/Vector.h>
+#    include <time.h>
+
+namespace {
+class Profiler {
+public:
+    Profiler(String name)
+    {
+        nodes = { {
+            .parent = 0,
+            .enter_time = current_monotonic_time(),
+            .leave_time = {},
+            .name = name,
+            .children = {},
+        } };
+    }
+
+    void push_entry(String node_name)
+    {
+        Time now = current_monotonic_time();
+
+        nodes[ptr].children.append(nodes.size());
+        nodes.append({ ptr, now, {}, node_name, {} });
+        ptr = nodes.size() - 1;
+    }
+
+    void pop_entry()
+    {
+        Time now = current_monotonic_time();
+
+        nodes[ptr].leave_time = now;
+        ptr = nodes[ptr].parent;
+    }
+
+    void stop()
+    {
+        nodes[0].leave_time = current_monotonic_time();
+        VERIFY(ptr == 0);
+    }
+
+    void print() const
+    {
+        print_internal(0, 0);
+    }
+
+    void clear()
+    {
+        nodes = { {} };
+        ptr = 0;
+    }
+
+private:
+    struct Node {
+        size_t parent;
+        Time enter_time, leave_time;
+        String name;
+        Vector<size_t> children;
+    };
+
+    Vector<Node> nodes;
+    size_t ptr = 0;
+
+    Time current_monotonic_time()
+    {
+        timespec now_spec;
+        clock_gettime(CLOCK_MONOTONIC, &now_spec);
+        return Time::from_timespec(now_spec);
+    }
+
+    void print_internal(int i, int level) const
+    {
+        u64 total = (nodes[i].leave_time - nodes[i].enter_time).to_nanoseconds();
+        u64 net = total;
+        for (auto child : nodes[i].children)
+            net -= (nodes[child].leave_time - nodes[child].enter_time).to_nanoseconds();
+
+        StringBuilder indent;
+        for (int i = 0; i < 3 * level; ++i)
+            indent.append(' ');
+        if (!nodes[i].children.is_empty())
+            dbgln("{}{} ({:06}s, local {:06}s)", MUST(indent.to_string()), nodes[i].name, total / 1e9, net / 1e9);
+        else
+            dbgln("{}{} ({:06}s)", MUST(indent.to_string()), nodes[i].name, total / 1e9);
+
+        for (auto child : nodes[i].children)
+            print_internal(child, level + 1);
+    }
+};
+
+OwnPtr<Profiler> global_profiler;
+}
+
+#    define CONCAT_IMPL(x, y) x##y
+#    define CONCAT(x, y) CONCAT_IMPL(x, y)
+
+#    define PROFILER_PUSH_ENTRY(format, ...) global_profiler->push_entry(MUST(String::formatted(format __VA_OPT__(, ) __VA_ARGS__)))
+#    define PROFILER_POP_ENTRY() global_profiler->pop_entry()
+#    define PROFILER_SCOPE(format, ...)    \
+        PROFILER_PUSH_ENTRY(format, __VA_ARGS__); \
+        auto CONCAT(profiler_guard_, __COUNTER__) = ScopeGuard([] { PROFILER_POP_ENTRY(); })
+#    define PROFILER_NEW_RUN(format, ...) \
+        global_profiler = OwnPtr<Profiler>::lift(new Profiler(MUST(String::formatted(format __VA_OPT__(, ) __VA_ARGS__))));
+#    define PROFILER_STOP() global_profiler->stop()
+#    define PROFILER_PRINT() global_profiler->print()
+#else
+#    define PROFILER_PUSH_ENTRY(format, ...)
+#    define PROFILER_POP_ENTRY()
+#    define PROFILER_SCOPE(format, ...)
+#    define PROFILER_NEW_RUN(format, ...)
+#    define PROFILER_STOP()
+#    define PROFILER_PRINT()
+#endif
+
 namespace AK {
 
 // TODO: update description
@@ -243,7 +363,11 @@ ALWAYS_INLINE static void ntt_multiply_constant(u64* a, size_t from, size_t to, 
 template<SIMD::UnrollingMode unrolling_mode>
 static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
 {
+    PROFILER_SCOPE("nntf");
+
     for (size_t outer_log_len = 0; outer_log_len < k;) {
+        PROFILER_SCOPE("outer_log_len {}/{}", outer_log_len, k);
+
         size_t inner_iters = outer_log_len || k % 6 == 0 ? 6 : k % 6;
         size_t part_len = one_sz << outer_log_len;
         size_t parts = one_sz << inner_iters;
@@ -254,6 +378,8 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
         // Multiply by twiddle factors
         if (outer_log_len) {
+            PROFILER_SCOPE("mult");
+
             size_t total_len = one_sz << (k - outer_log_len);
             size_t inner_len = one_sz << shift;
 
@@ -282,10 +408,14 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
             }
         }
 
+        PROFILER_SCOPE("convolve");
+
         // Do NTTs of size `parts`
         for (size_t log_len = 0; log_len < inner_iters; ++log_len) {
             size_t total_len = one_sz << (k - outer_log_len - log_len - 1);
             if (inner_iters - log_len >= 2 && total_len >= 8) {
+                PROFILER_SCOPE("type1 for {}", log_len);
+
                 size_t total_len2 = one_sz << (k - outer_log_len - log_len - 2);
 
                 for (size_t i = 0; i < n2; i += 2 * total_len) {
@@ -297,6 +427,8 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
                 ++log_len;
             } else {
+                PROFILER_SCOPE("type2 for {}", log_len);
+
                 if (total_len == 2) [[likely]] {
                     for (size_t i = 0; i < n2; i += 4) {
                         size_t shift2 = reversed_bits_64[i & 63]; // [0; 16)
@@ -332,7 +464,11 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 template<SIMD::UnrollingMode unrolling_mode>
 static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer)
 {
+    PROFILER_SCOPE("nttr");
+
     for (size_t outer_log_len = 0; outer_log_len < k;) {
+        PROFILER_SCOPE("outer_log_len {}/{}", outer_log_len, k);
+
         size_t inner_iters = outer_log_len || k % 6 == 0 ? 6 : k % 6;
         size_t part_len = one_sz << outer_log_len;
         size_t shift = k - inner_iters - outer_log_len;
@@ -342,6 +478,8 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
         // Multiply by twiddle factors
         if (outer_log_len) {
+            PROFILER_SCOPE("mult");
+
             if (shift) {
                 u64* local_factors = twiddle_sparse;
                 if (shift > 6) {
@@ -376,6 +514,8 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
             size_t total_len = len << outer_log_len;
 
             if (inner_iters - log_len >= 2) {
+                PROFILER_SCOPE("type3 for {}", log_len);
+
                 for (size_t i = 0; i < n2; i += 4 * total_len) {
                     for (size_t j = i; j < i + total_len; j += part_len) {
                         size_t shift1 = 3 * ((j - i) >> outer_log_len << (6 - log_len - 1) & 63);
@@ -386,6 +526,8 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
                 }
                 ++log_len;
             } else {
+                PROFILER_SCOPE("type4 for {}", log_len);
+
                 for (size_t i = 0; i < n2; i += 2 * total_len) {
                     for (size_t j = i; j < i + total_len; j += part_len) {
                         size_t shift = 3 * ((j - i) >> outer_log_len << (6 - log_len - 1) & 63);
@@ -402,6 +544,8 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 template<SIMD::UnrollingMode unrolling_mode>
 static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeWord const* data2, size_t size2, NativeWord* result, size_t size, NativeWord* buffer)
 {
+    PROFILER_NEW_RUN("storage_mul_ntt");
+
     auto allocate_u64 = [&](size_t amount) {
         u64* result = reinterpret_cast<u64*>(buffer);
         buffer += (word_size == 32 ? 2 : 1) * amount;
@@ -429,6 +573,7 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
     VERIFY(k >= 4);
 
     // Count twiddle factors
+    PROFILER_PUSH_ENTRY("twiddle factors");
     u64 root = roots_of_unity[k];
 
     u64* twiddle_start = nullptr;
@@ -453,10 +598,12 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
         for (size_t i = 1; i < n; ++i)
             twiddle_start[i] = mod_mul(twiddle_start[i - 1], root);
     }
+    PROFILER_POP_ENTRY();
 
     SIMD::align_up(buffer, unrolling_mode);
 
     // Split arguments into u16 words
+    PROFILER_PUSH_ENTRY("split");
     auto split = [&](NativeWord const* data, size_t size, u64* operand) {
         if constexpr (word_size == 32) {
             for (size_t i = 0; i < size; ++i) {
@@ -483,8 +630,10 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
     u64* operand2 = reinterpret_cast<u64*>(buffer);
     split(data2, size2, operand2);
     buffer += (word_size == 32 ? 2 : 1) * n; // u64[n]
+    PROFILER_POP_ENTRY();
 
     // Count reversed bit representations of indexes
+    PROFILER_PUSH_ENTRY("reversed_idx");
     NativeWord* reversed_idx = allocate_native(n >> 6);
     if (n >= 64) {
         reversed_idx[0] = 0;
@@ -493,15 +642,22 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
         for (size_t i = 1; i < (n >> 6); ++i)
             reversed_idx[i] = reversed_idx[i & (i - 1)] ^ reversed_idx[i ^ (i & (i - 1))];
     }
+    PROFILER_POP_ENTRY();
 
     // "Allocate" twiddle factors buffer
     u64* twiddle_buffer = reinterpret_cast<u64*>(buffer);
 
     // Multiplication time has come.
     nttf<unrolling_mode>(k, n, 2 * n, operand1, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
+
+    PROFILER_PUSH_ENTRY("multiply");
     for (size_t i = 0; i < n; ++i)
         operand1[i] = mod_mul(operand1[i], operand2[i]);
+    PROFILER_POP_ENTRY();
+
     nttr<unrolling_mode>(k, n, n, operand1, twiddle_start, twiddle_sparse, twiddle_buffer);
+
+    PROFILER_PUSH_ENTRY("return");
     for (size_t i = 1; i < n / 2; ++i)
         swap(operand1[i], operand1[n - i]);
 
@@ -530,6 +686,10 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
         carry >>= 16;
         carry += static_cast<u64>(local_carry) << 48;
     }
+    PROFILER_POP_ENTRY();
+
+    PROFILER_STOP();
+    PROFILER_PRINT();
 }
 
 void storage_mul_smart(NativeWord const* data1, size_t size1, NativeWord const* data2, size_t size2, NativeWord* result, size_t size, NativeWord* buffer)
