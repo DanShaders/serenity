@@ -12,7 +12,7 @@ extern "C" {
 
 void ak_verification_failed(char const* message)
 {
-    dbgln("VERIFICATION FAILED: {}", message);
+    AK::dbgln("VERIFICATION FAILED: {}", message);
     __builtin_trap();
 }
 }

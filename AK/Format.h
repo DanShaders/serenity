@@ -752,11 +752,10 @@ using AK::dbgln;
 using AK::CheckedFormatString;
 using AK::FormatIfSupported;
 using AK::FormatString;
-
-#    define dbgln_if(flag, fmt, ...)       \
-        do {                               \
-            if constexpr (flag)            \
-                dbgln(fmt, ##__VA_ARGS__); \
-        } while (0)
-
 #endif
+
+#define dbgln_if(flag, fmt, ...)           \
+    do {                                   \
+        if constexpr (flag)                \
+            AK::dbgln(fmt, ##__VA_ARGS__); \
+    } while (0)

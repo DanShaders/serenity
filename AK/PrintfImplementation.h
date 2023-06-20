@@ -23,6 +23,7 @@ extern "C" size_t strlen(char const*);
 #endif
 
 namespace PrintfImplementation {
+using namespace AK;
 
 template<typename PutChFunc, typename T, typename CharType>
 ALWAYS_INLINE int print_hex(PutChFunc putch, CharType*& bufptr, T number, bool upper_case, bool alternate_form, bool left_pad, bool zero_pad, u32 field_width, bool has_precision, u32 precision)
