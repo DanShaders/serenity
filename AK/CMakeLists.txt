@@ -40,10 +40,25 @@ set(AK_SOURCES
     Utf8View.cpp
     kmalloc.cpp
 )
-# AK sources are included from many different places, such as the Kernel, LibC, and Loader
-list(TRANSFORM AK_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
-set(AK_SOURCES ${AK_SOURCES} PARENT_SCOPE)
+configure_file(Debug.h.in Debug.h)
 
-serenity_install_headers(AK)
-serenity_install_sources(AK)
+add_library(AK_PublicInterface INTERFACE)
+target_compile_options(AK_PublicInterface INTERFACE
+    -Wno-literal-suffix
+    -Wno-dangling-reference
+    -Wno-maybe-uninitialized
+)
+target_include_directories(AK_PublicInterface INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    "${CMAKE_CURRENT_BINARY_DIR}/.."
+)
+
+add_library(AK_PrivateInterface INTERFACE)
+target_compile_options(AK_PrivateInterface INTERFACE
+    -O2 -Wall -Wextra -Wno-shadow -Werror
+)
+
+add_library(AK_Host STATIC EXCLUDE_FROM_ALL ${AK_SOURCES})
+target_compile_options(AK_Host PRIVATE ${ADELAIDE_HOST_COMPILE_OPTIONS})
+target_link_libraries(AK_Host PUBLIC AK_PublicInterface PRIVATE AK_PrivateInterface)
