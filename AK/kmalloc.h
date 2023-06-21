@@ -12,7 +12,7 @@
 
 #if defined(KERNEL)
 #    include <Kernel/Heap/kmalloc.h>
-#else
+#elif !defined(AK_OS_FREESTANDING)
 #    include <new>
 #    include <stdlib.h>
 
@@ -24,9 +24,11 @@ inline void kfree_sized(void* ptr, size_t)
 {
     free(ptr);
 }
+#else
+#    include "AllocatorImplementation.h"
 #endif
 
-#ifndef AK_OS_SERENITY
+#if !defined(AK_OS_SERENITY) && !defined(AK_OS_FREESTANDING)
 #    include <AK/Types.h>
 
 #    ifndef AK_OS_MACOS

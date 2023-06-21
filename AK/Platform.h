@@ -43,60 +43,62 @@
 
 #if defined(__serenity__)
 #    define AK_OS_SERENITY
-#endif
-
-#if defined(__linux__)
-#    define AK_OS_LINUX
-#endif
-
-#if defined(__APPLE__) && defined(__MACH__)
-#    define AK_OS_MACOS
-#    define AK_OS_BSD_GENERIC
-#endif
-
-#if defined(__FreeBSD__)
-#    define AK_OS_BSD_GENERIC
-#    define AK_OS_FREEBSD
-#endif
-
-#if defined(__NetBSD__)
-#    define AK_OS_BSD_GENERIC
-#    define AK_OS_NETBSD
-#endif
-
-#if defined(__OpenBSD__)
-#    define AK_OS_BSD_GENERIC
-#    define AK_OS_OPENBSD
-#endif
-
-#if defined(__DragonFly__)
-#    define AK_OS_BSD_GENERIC
-#    define AK_OS_DRAGONFLY
-#endif
-
-#if defined(__sun)
-#    define AK_OS_BSD_GENERIC
-#    define AK_OS_SOLARIS
-#endif
-
-#if defined(_WIN32) || defined(_WIN64)
-#    define AK_OS_WINDOWS
-#endif
-
-#if defined(__ANDROID__)
-#    define STR(x) __STR(x)
-#    define __STR(x) #x
-#    if __ANDROID_API__ < 30
-#        pragma message "Invalid android API " STR(__ANDROID_API__)
-#        error "Build configuration not tested on configured Android API version"
+#elif __STDC_HOSTED__
+#    if defined(__linux__)
+#        define AK_OS_LINUX
 #    endif
-#    undef STR
-#    undef __STR
-#    define AK_OS_ANDROID
-#endif
 
-#if defined(__EMSCRIPTEN__)
-#    define AK_OS_EMSCRIPTEN
+#    if defined(__APPLE__) && defined(__MACH__)
+#        define AK_OS_MACOS
+#        define AK_OS_BSD_GENERIC
+#    endif
+
+#    if defined(__FreeBSD__)
+#        define AK_OS_BSD_GENERIC
+#        define AK_OS_FREEBSD
+#    endif
+
+#    if defined(__NetBSD__)
+#        define AK_OS_BSD_GENERIC
+#        define AK_OS_NETBSD
+#    endif
+
+#    if defined(__OpenBSD__)
+#        define AK_OS_BSD_GENERIC
+#        define AK_OS_OPENBSD
+#    endif
+
+#    if defined(__DragonFly__)
+#        define AK_OS_BSD_GENERIC
+#        define AK_OS_DRAGONFLY
+#    endif
+
+#    if defined(__sun)
+#        define AK_OS_BSD_GENERIC
+#        define AK_OS_SOLARIS
+#    endif
+
+#    if defined(_WIN32) || defined(_WIN64)
+#        define AK_OS_WINDOWS
+#    endif
+
+#    if defined(__ANDROID__)
+#        define STR(x) __STR(x)
+#        define __STR(x) #x
+#        if __ANDROID_API__ < 30
+#            pragma message "Invalid android API " STR(__ANDROID_API__)
+#            error "Build configuration not tested on configured Android API version"
+#        endif
+#        undef STR
+#        undef __STR
+#        define AK_OS_ANDROID
+#    endif
+
+#    if defined(__EMSCRIPTEN__)
+#        define AK_OS_EMSCRIPTEN
+#    endif
+#else
+#    define AK_OS_FREESTANDING
 #endif
 
 #define ARCH(arch) (AK_IS_ARCH_##arch())

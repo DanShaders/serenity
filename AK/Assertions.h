@@ -9,9 +9,9 @@
 #if defined(KERNEL)
 #    include <Kernel/Library/Assertions.h>
 #else
-#    include <assert.h>
 extern "C" __attribute__((noreturn)) void ak_verification_failed(char const*);
-#    ifndef NDEBUG
+#    if !defined(AK_OS_FREESTANDING) && !defined(NDEBUG)
+#        include <assert.h>
 #        define VERIFY assert
 #    else
 #        define __stringify_helper(x) #x

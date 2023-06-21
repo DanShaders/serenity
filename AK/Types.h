@@ -34,7 +34,7 @@ using f128 = long double;
 #    endif
 #endif
 
-#ifdef AK_OS_SERENITY
+#if defined(AK_OS_SERENITY) || defined(AK_OS_FREESTANDING)
 
 using size_t = __SIZE_TYPE__;
 using ssize_t = AK::Detail::MakeSigned<size_t>;
