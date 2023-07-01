@@ -16,7 +16,6 @@
 #    include <AK/String.h>
 #    include <AK/Time.h>
 #    include <AK/Vector.h>
-#    include <time.h>
 
 namespace {
 class Profiler {
@@ -25,7 +24,7 @@ public:
     {
         nodes = { {
             .parent = 0,
-            .enter_time = current_monotonic_time(),
+            .enter_time = MonotonicTime::now(),
             .leave_time = {},
             .name = name,
             .children = {},
@@ -34,24 +33,22 @@ public:
 
     void push_entry(String node_name)
     {
-        Time now = current_monotonic_time();
+        auto now = MonotonicTime::now();
 
         nodes[ptr].children.append(nodes.size());
-        nodes.append({ ptr, now, {}, node_name, {} });
+        nodes.append({ ptr, now, {}, move(node_name), {} });
         ptr = nodes.size() - 1;
     }
 
     void pop_entry()
     {
-        Time now = current_monotonic_time();
-
-        nodes[ptr].leave_time = now;
+        nodes[ptr].leave_time = MonotonicTime::now();
         ptr = nodes[ptr].parent;
     }
 
     void stop()
     {
-        nodes[0].leave_time = current_monotonic_time();
+        nodes[0].leave_time = MonotonicTime::now();
         VERIFY(ptr == 0);
     }
 
@@ -69,7 +66,7 @@ public:
 private:
     struct Node {
         size_t parent;
-        Time enter_time, leave_time;
+        Optional<MonotonicTime> enter_time, leave_time;
         String name;
         Vector<size_t> children;
     };
@@ -77,19 +74,12 @@ private:
     Vector<Node> nodes;
     size_t ptr = 0;
 
-    Time current_monotonic_time()
-    {
-        timespec now_spec;
-        clock_gettime(CLOCK_MONOTONIC, &now_spec);
-        return Time::from_timespec(now_spec);
-    }
-
     void print_internal(int i, int level) const
     {
-        u64 total = (nodes[i].leave_time - nodes[i].enter_time).to_nanoseconds();
+        u64 total = (nodes[i].leave_time.value() - nodes[i].enter_time.value()).to_nanoseconds();
         u64 net = total;
         for (auto child : nodes[i].children)
-            net -= (nodes[child].leave_time - nodes[child].enter_time).to_nanoseconds();
+            net -= (nodes[child].leave_time.value() - nodes[child].enter_time.value()).to_nanoseconds();
 
         StringBuilder indent;
         for (int i = 0; i < 3 * level; ++i)
@@ -494,7 +484,7 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
                         continue;
 
                     // Since twiddle_buffer is usually small enough to fit in the cache, it's faster
-                    // to scatter-gather values from it rather than recomputing them.
+                    // to scatter-gather values from it rather than recompute them.
                     ntt_multiply_arbitrary2<unrolling_mode>(part_offset, part_offset + part_len, part_in_block, (n >> shift) - 1, a, local_factors);
                 }
             } else {
