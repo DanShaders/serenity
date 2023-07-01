@@ -112,7 +112,7 @@ OwnPtr<Profiler> global_profiler;
 
 #    define PROFILER_PUSH_ENTRY(format, ...) global_profiler->push_entry(MUST(String::formatted(format __VA_OPT__(, ) __VA_ARGS__)))
 #    define PROFILER_POP_ENTRY() global_profiler->pop_entry()
-#    define PROFILER_SCOPE(format, ...)    \
+#    define PROFILER_SCOPE(format, ...)           \
         PROFILER_PUSH_ENTRY(format, __VA_ARGS__); \
         auto CONCAT(profiler_guard_, __COUNTER__) = ScopeGuard([] { PROFILER_POP_ENTRY(); })
 #    define PROFILER_NEW_RUN(format, ...) \
@@ -128,7 +128,7 @@ OwnPtr<Profiler> global_profiler;
 #    define PROFILER_PRINT()
 #endif
 
-namespace AK {
+namespace AK::Detail {
 
 // TODO: update description
 
@@ -674,11 +674,11 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
         bool local_carry = false;
 
         if constexpr (word_size == 64) {
-            add_words(carry, operand1[i], carry, local_carry);
+            carry = add_words(operand1[i], carry, local_carry);
         } else {
             NativeWord low_carry, high_carry;
-            add_words(carry, operand1[i], low_carry, local_carry);
-            add_words(carry >> 32, operand1[i] >> 32, high_carry, local_carry);
+            low_carry = add_words(carry, operand1[i], local_carry);
+            high_carry = add_words(carry >> 32, operand1[i] >> 32, local_carry);
             carry = (static_cast<u64>(high_carry) << 32) + low_carry;
         }
 

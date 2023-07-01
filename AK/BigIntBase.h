@@ -36,12 +36,12 @@ concept BuiltInUFixedInt = OneOf<T, bool, u8, u16, u32, u64, unsigned long, unsi
 template<typename T>
 constexpr inline size_t bit_width = sizeof(T) * 8;
 
-constexpr size_t word_size = bit_width<NativeWord>;
-constexpr NativeWord max_word = ~static_cast<NativeWord>(0);
+constexpr inline size_t word_size = bit_width<NativeWord>;
+constexpr inline NativeWord max_word = ~static_cast<NativeWord>(0);
 static_assert(word_size == 32 || word_size == 64);
 
 // Max big integer length is 256 MiB (2.1e9 bits) for 32-bit, 4 GiB (3.4e10 bits) for 64-bit.
-constexpr size_t max_big_int_length = 1 << (word_size == 32 ? 26 : 29);
+constexpr inline size_t max_big_int_length = 1 << (word_size == 32 ? 26 : 29);
 
 // ===== Static storage for big integers =====
 // FIXME: remove once Clang formats these properly.
@@ -533,6 +533,8 @@ struct StorageOperations {
             negate(result, result);
     }
 };
+
+void storage_mul_smart(NativeWord const* data1, size_t size1, NativeWord const* data2, size_t size2, NativeWord* result, size_t size, NativeWord* buffer);
 }
 
 using Detail::StorageOperations, Detail::NativeWord, Detail::word_size, Detail::max_word,
