@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, Dan Klishch <danilklishch@gmail.com>
+ * Copyright (c) 2023, Dan Klishch <danilklishch@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -252,7 +252,7 @@ static u64 mod_reduce(u64 low, u64 middle, u64 high)
 #endif
 
 // (a * b) % modulus
-static u64 mod_mul(u64 a, u64 b)
+static ALWAYS_INLINE u64 mod_mul(u64 a, u64 b)
 {
     u128 c = AK::UFixedBigInt<64>(a).wide_multiply(b);
     return mod_reduce(c.low(), c.high() & 0xffff'ffffULL, c.high() >> 32);
@@ -325,13 +325,35 @@ ALWAYS_INLINE static void ntt_convolve3(u64* a, size_t j, size_t part_len, size_
     ntt_convolve<unrolling_mode>(a, j + total_len, part_len, 2 * total_len, shift3);
 }
 
-template<SIMD::UnrollingMode>
+template<SIMD::UnrollingMode unrolling_mode, int interleaving>
+ALWAYS_INLINE static void ntt_convolve4(u64* a, u64 i, u64 shift1, u64 shift2, u64 shift3)
+{
+    for (size_t copy = 0; copy < interleaving; ++copy) {
+#define IDX(expr) interleaving*(expr) + copy
+        auto x = a[IDX(i)], y = mod_shift<4>(a[IDX(i + 2)], 3 * shift1);
+        a[IDX(i)] = mod_add(x, y), a[IDX(i + 2)] = mod_sub(x, y);
+        x = a[IDX(i + 1)], y = mod_shift<4>(a[IDX(i + 3)], 3 * shift1);
+        a[IDX(i + 1)] = mod_add(x, y), a[IDX(i + 3)] = mod_sub(x, y);
+
+        x = a[IDX(i)], y = mod_shift<4>(a[IDX(i + 1)], 3 * shift2);
+        a[IDX(i)] = mod_add(x, y), a[IDX(i + 1)] = mod_sub(x, y);
+
+        x = a[IDX(i + 2)], y = mod_shift<4>(a[IDX(i + 3)], 3 * shift3);
+        a[IDX(i + 2)] = mod_add(x, y), a[IDX(i + 3)] = mod_sub(x, y);
+#undef IDX
+    }
+}
+
+template<SIMD::UnrollingMode, int interleaving>
 ALWAYS_INLINE static void ntt_multiply_arbitrary(size_t from, size_t to, size_t scale, u64* a, u64* local_factors)
 {
     size_t scaling = local_factors[scale];
     size_t factor = 1;
     for (size_t i = from; i < to; ++i) {
-        a[i] = mod_mul(a[i], factor);
+        for (size_t copy = 0; copy < interleaving; ++copy) {
+            u64 index = interleaving * i + copy;
+            a[index] = mod_mul(a[index], factor);
+        }
         factor = mod_mul(factor, scaling);
     }
 }
@@ -355,8 +377,8 @@ ALWAYS_INLINE static void ntt_multiply_constant(u64* a, size_t from, size_t to, 
         a[i] = mod_mul(a[i], value);
 }
 
-template<SIMD::UnrollingMode unrolling_mode>
-static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
+template<SIMD::UnrollingMode unrolling_mode, int interleaving>
+static void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
 {
     PROFILER_SCOPE("nntf");
 
@@ -379,9 +401,9 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
             size_t inner_len = one_sz << shift;
 
             if (inner_len == 1) {
-                for (size_t i = 0; i < n2; i += parts) {
+                for (size_t i = 0; i < n; i += parts) {
                     size_t offset_in_part = reversed_idx[(i & (n - 1)) >> 6] >> 6;
-                    ntt_multiply_arbitrary<unrolling_mode>(i, i + parts, offset_in_part, a, twiddle_start);
+                    ntt_multiply_arbitrary<unrolling_mode, interleaving>(i, i + parts, offset_in_part, a, twiddle_start);
                 }
             } else {
                 u64* local_factors = twiddle_sparse;
@@ -391,14 +413,14 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
                         local_factors[i] = twiddle_sparse[i << (shift - 6)];
                 }
 
-                for (size_t i = 0; i < n2; i += total_len) {
+                for (size_t i = 0; i < n; i += total_len) {
                     size_t offset_in_part = reversed_idx[(i & (n - 1)) >> 12] >> 12 & (part_len - 1);
                     if (!offset_in_part)
                         continue;
 
                     for (size_t j = i, idx = 0; j < i + total_len; j += inner_len, (idx += offset_in_part) &= (n >> shift) - 1)
                         if (idx)
-                            ntt_multiply_constant<unrolling_mode>(a, j, j + inner_len, local_factors[idx]);
+                            ntt_multiply_constant<unrolling_mode>(a, interleaving * j, interleaving * (j + inner_len), local_factors[idx]);
                 }
             }
         }
@@ -413,11 +435,11 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
 
                 size_t total_len2 = one_sz << (k - outer_log_len - log_len - 2);
 
-                for (size_t i = 0; i < n2; i += 2 * total_len) {
+                for (size_t i = 0; i < n; i += 2 * total_len) {
                     size_t shift1 = 3 * (reversed_bits_64[i >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 1) & 63);
                     size_t shift2 = 3 * (reversed_bits_64[i >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 2) & 63);
                     size_t shift3 = 3 * (reversed_bits_64[(i + total_len) >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 2) & 63);
-                    ntt_convolve2<unrolling_mode>(a, i, total_len2, shift1, shift2, shift3);
+                    ntt_convolve2<unrolling_mode>(a, interleaving * i, interleaving * total_len2, shift1, shift2, shift3);
                 }
 
                 ++log_len;
@@ -425,28 +447,18 @@ static void nttf(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
                 PROFILER_SCOPE("type2 for {}", log_len);
 
                 if (total_len == 2) [[likely]] {
-                    for (size_t i = 0; i < n2; i += 4) {
+                    for (size_t i = 0; i < n; i += 4) {
                         size_t shift2 = reversed_bits_64[i & 63]; // [0; 16)
                         size_t shift3 = shift2 + 16;              // [16; 32)
-                        size_t shift1 = shift2 << 1;
-
-                        auto x = a[i], y = mod_shift<4>(a[i + 2], 3 * shift1);
-                        a[i] = mod_add(x, y), a[i + 2] = mod_sub(x, y);
-                        x = a[i + 1], y = mod_shift<4>(a[i + 3], 3 * shift1);
-                        a[i + 1] = mod_add(x, y), a[i + 3] = mod_sub(x, y);
-
-                        x = a[i], y = mod_shift<4>(a[i + 1], 3 * shift2);
-                        a[i] = mod_add(x, y), a[i + 1] = mod_sub(x, y);
-
-                        x = a[i + 2], y = mod_shift<4>(a[i + 3], 3 * shift3);
-                        a[i + 2] = mod_add(x, y), a[i + 3] = mod_sub(x, y);
+                        size_t shift1 = shift2 << 1;              // [0; 32)
+                        ntt_convolve4<unrolling_mode, interleaving>(a, i, shift1, shift2, shift3);
                     }
                     ++log_len;
                 } else {
                     // This should not be reachable at all for sufficiently large k (kept for debug purposes)
-                    for (size_t i = 0; i < n2; i += 2 * total_len) {
+                    for (size_t i = 0; i < n; i += 2 * total_len) {
                         size_t shift = 3 * (reversed_bits_64[i >> max(0, int(k) - int(outer_log_len) - 6) & 63] << (6 - log_len - 1) & 63);
-                        ntt_convolve<unrolling_mode>(a, i, total_len, total_len, shift);
+                        ntt_convolve<unrolling_mode>(a, interleaving * i, interleaving * total_len, interleaving * total_len, shift);
                     }
                 }
             }
@@ -498,7 +510,7 @@ static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64*
                     if (!part_in_block)
                         continue;
 
-                    ntt_multiply_arbitrary<unrolling_mode>(part_offset, part_offset + part_len, part_in_block, a, twiddle_start);
+                    ntt_multiply_arbitrary<unrolling_mode, 1>(part_offset, part_offset + part_len, part_in_block, a, twiddle_start);
                 }
             }
         }
@@ -599,32 +611,33 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
 
     // Split arguments into u16 words
     PROFILER_PUSH_ENTRY("split");
-    auto split = [&](NativeWord const* data, size_t size, u64* operand) {
+
+    u64* operands = reinterpret_cast<u64*>(buffer);
+    buffer += (word_size == 32 ? 2 : 1) * 2 * n; // u64[2 * n]
+
+    auto split_at = [&](u64 base, NativeWord word) {
         if constexpr (word_size == 32) {
-            for (size_t i = 0; i < size; ++i) {
-                operand[2 * i] = data[i] & 0xffff;
-                operand[2 * i + 1] = data[i] >> 16;
-            }
-            memset(operand + 2 * size, 0, sizeof(u64) * (n - 2 * size));
+            operands[base] = word & 0xffff;
+            operands[base + 2] = word >> 16;
         } else {
-            for (size_t i = 0; i < size; ++i) {
-                u64 current = data[i];
-                operand[4 * i] = static_cast<u16>(current);
-                operand[4 * i + 1] = static_cast<u16>(current >> 16);
-                operand[4 * i + 2] = static_cast<u16>(current >> 32);
-                operand[4 * i + 3] = static_cast<u16>(current >> 48);
-            }
-            memset(operand + 4 * size, 0, sizeof(u64) * (n - 4 * size));
+            operands[base] = static_cast<u16>(word);
+            operands[base + 2] = static_cast<u16>(word >> 16);
+            operands[base + 4] = static_cast<u16>(word >> 32);
+            operands[base + 6] = static_cast<u16>(word >> 48);
         }
     };
 
-    u64* operand1 = reinterpret_cast<u64*>(buffer);
-    split(data1, size1, operand1);
-    buffer += (word_size == 32 ? 2 : 1) * n; // u64[n]
+    u64 base = 0;
+    for (u64 i = 0; i < min(size1, size2); ++i, base += word_size == 32 ? 4 : 8) {
+        split_at(base, data1[i]);
+        split_at(base + 1, data2[i]);
+    }
+    for (u64 i = min(size1, size2); i < max(size1, size2); ++i, base += word_size == 32 ? 4 : 8) {
+        split_at(base, i < size1 ? data1[i] : 0);
+        split_at(base + 1, i < size2 ? data2[i] : 0);
+    }
+    memset(operands + base, 0, sizeof(NativeWord) * (buffer - operands - base));
 
-    u64* operand2 = reinterpret_cast<u64*>(buffer);
-    split(data2, size2, operand2);
-    buffer += (word_size == 32 ? 2 : 1) * n; // u64[n]
     PROFILER_POP_ENTRY();
 
     // Count reversed bit representations of indexes
@@ -643,22 +656,17 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
     u64* twiddle_buffer = reinterpret_cast<u64*>(buffer);
 
     // Multiplication time has come.
-    nttf<unrolling_mode>(k, n, 2 * n, operand1, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
+    nttf<unrolling_mode, 2>(k, n, operands, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
 
     PROFILER_PUSH_ENTRY("multiply");
     for (size_t i = 0; i < n; ++i)
-        operand1[i] = mod_mul(operand1[i], operand2[i]);
+        operands[i] = mod_mul(operands[2 * i], operands[2 * i + 1]);
     PROFILER_POP_ENTRY();
 
-    nttr<unrolling_mode>(k, n, n, operand1, twiddle_start, twiddle_sparse, twiddle_buffer);
+    nttr<unrolling_mode>(k, n, n, operands, twiddle_start, twiddle_sparse, twiddle_buffer);
 
     PROFILER_PUSH_ENTRY("return");
-    for (size_t i = 1; i < n / 2; ++i)
-        swap(operand1[i], operand1[n - i]);
-
     u64 modular_inverse_of_n = modulus - (modulus >> k); // (modular_inverse_of_n * n) % modulus == 1
-    for (size_t i = 0; i < n; ++i)
-        operand1[i] = mod_mul(operand1[i], modular_inverse_of_n);
 
     // Copy everything they want from us to the result
     constexpr size_t scale = word_size / 16;
@@ -668,12 +676,14 @@ static void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeW
     for (size_t i = 0; i < min(n, size * scale); ++i) {
         bool local_carry = false;
 
+        auto current_word = mod_mul(operands[(n - i) & (n - 1)], modular_inverse_of_n);
+
         if constexpr (word_size == 64) {
-            carry = add_words(operand1[i], carry, local_carry);
+            carry = add_words(current_word, carry, local_carry);
         } else {
             NativeWord low_carry, high_carry;
-            low_carry = add_words(carry, operand1[i], local_carry);
-            high_carry = add_words(carry >> 32, operand1[i] >> 32, local_carry);
+            low_carry = add_words(carry, current_word, local_carry);
+            high_carry = add_words(carry >> 32, current_word >> 32, local_carry);
             carry = (static_cast<u64>(high_carry) << 32) + low_carry;
         }
 
@@ -745,8 +755,20 @@ static ALWAYS_INLINE TARGET_AVX2 u64x4 mod_shift(u64x4 y, size_t shift)
         return mod_reduce_vec_96(y << shift, y >> (64 - shift) << 32);
     } else if constexpr (sc == 2) {
         return mod_reduce_vec_128(y << shift, y >> (64 - shift) << 32, y >> (96 - shift));
-    } else {
+    } else if constexpr (sc == 3) {
         return mod_reduce_vec_159(y << (shift - 32), y >> (96 - shift));
+    } else if constexpr (sc == 4) {
+        if (shift == 0) {
+            return mod_shift<0>(y, shift);
+        } else if (shift <= 32) {
+            return mod_shift<1>(y, shift);
+        } else if (shift < 64) {
+            return mod_shift<2>(y, shift);
+        } else {
+            return mod_shift<3>(y, shift);
+        }
+    } else {
+        VERIFY_NOT_REACHED();
     }
 }
 
@@ -854,10 +876,33 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_convolve3<SIMD::AVX2>(u64* a, size_t j, size_
 }
 
 template<>
-ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_arbitrary<SIMD::AVX2>(size_t from, size_t to, size_t scale, u64* a, u64* local_factors)
+ALWAYS_INLINE TARGET_AVX2 void ntt_convolve4<SIMD::AVX2, 2>(u64* a, u64 i, u64 shift1, u64 shift2, u64 shift3)
+{
+    auto b = reinterpret_cast<u64x4*>(a + 2 * i);
+
+    auto low = *b, high = mod_shift<4>(*(b + 1), 3 * shift1);
+    mod_add_sub(low, high);
+    *b = low;
+    *(b + 1) = high;
+
+#    define b (a + 2 * i)
+
+    auto x = b[0], y = mod_shift<4>(b[2], 3 * shift2);
+    b[0] = mod_add(x, y), b[2] = mod_sub(x, y);
+    x = b[1], y = mod_shift<4>(b[3], 3 * shift2);
+    b[1] = mod_add(x, y), b[3] = mod_sub(x, y);
+
+    x = b[4], y = mod_shift<4>(b[6], 3 * shift3);
+    b[4] = mod_add(x, y), b[6] = mod_sub(x, y);
+    x = b[5], y = mod_shift<4>(b[7], 3 * shift3);
+    b[5] = mod_add(x, y), b[7] = mod_sub(x, y);
+}
+
+template<>
+ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_arbitrary<SIMD::AVX2, 1>(size_t from, size_t to, size_t scale, u64* a, u64* local_factors)
 {
     if (to - from < 4)
-        return ntt_multiply_arbitrary<SIMD::NONE>(from, to, scale, a, local_factors);
+        return ntt_multiply_arbitrary<SIMD::NONE, 1>(from, to, scale, a, local_factors);
 
     u64 scale_factor = local_factors[scale];
     u64 factor = 1;
@@ -869,6 +914,31 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_arbitrary<SIMD::AVX2>(size_t from, s
         factor = mod_mul(factor, scale_factor);
         auto x2 = static_cast<unsigned __int128>(a[i + 2]) * factor;
         factor = mod_mul(factor, scale_factor);
+        auto x3 = static_cast<unsigned __int128>(a[i + 3]) * factor;
+        factor = mod_mul(factor, scale_factor);
+
+        u64x4 low = { (u64)x0, (u64)x1, (u64)x2, (u64)x3 };
+        u64x4 middle = { (u64)(x0 >> 64), (u64)(x1 >> 64), (u64)(x2 >> 64), (u64)(x3 >> 64) };
+        u64x4 high = middle >> 32;
+        middle <<= 32;
+        *(u64x4*)(a + i) = mod_reduce_vec_128(low, middle, high);
+    }
+}
+
+template<>
+ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_arbitrary<SIMD::AVX2, 2>(size_t from, size_t to, size_t scale, u64* a, u64* local_factors)
+{
+    if (to - from < 4)
+        return ntt_multiply_arbitrary<SIMD::NONE, 2>(from, to, scale, a, local_factors);
+
+    u64 scale_factor = local_factors[scale];
+    u64 factor = 1;
+
+    for (size_t i = 2 * from; i < 2 * to; i += 4) {
+        auto x0 = static_cast<unsigned __int128>(a[i]) * factor;
+        auto x1 = static_cast<unsigned __int128>(a[i + 1]) * factor;
+        factor = mod_mul(factor, scale_factor);
+        auto x2 = static_cast<unsigned __int128>(a[i + 2]) * factor;
         auto x3 = static_cast<unsigned __int128>(a[i + 3]) * factor;
         factor = mod_mul(factor, scale_factor);
 
@@ -927,8 +997,7 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_constant<SIMD::AVX2>(u64* a, size_t 
     }
 }
 
-template TARGET_AVX2 void nttf<SIMD::AVX2>(size_t, size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*);
+template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*);
 template TARGET_AVX2 void nttr<SIMD::AVX2>(size_t, size_t, size_t, u64*, u64*, u64*, u64*);
 #endif
-
 }
