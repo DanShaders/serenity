@@ -739,10 +739,10 @@ static ALWAYS_INLINE TARGET_AVX2 u64x4 mod_reduce_vec_128(u64x4 low, u64x4 middl
 
 static ALWAYS_INLINE TARGET_AVX2 u64x4 mod_reduce_vec_159(u64x4 middle, u64x4 high)
 {
-    middle -= middle >> 32;
-    u64x4 corrected_result = middle - high;
-    u64x4 result = corrected_result + modulus;
-    u64x4 mask = result < middle || result >= modulus;
+    u64x4 x = (middle >> 32) + high;
+    u64x4 mask = middle < x;
+    u64x4 result = middle - x;
+    u64x4 corrected_result = result + modulus;
     return (u64x4)__builtin_ia32_pblendvb256((c8x32)result, (c8x32)corrected_result, (c8x32)mask);
 }
 
@@ -780,7 +780,7 @@ static ALWAYS_INLINE TARGET_AVX2 void mod_add_sub(u64x4& xs, u64x4& ys)
     u64x4 res_xs = (u64x4)__builtin_ia32_pblendvb256((c8x32)added, (c8x32)corrected_add, minus_ys <= xs);
 
     auto corrected_sub = xs + minus_ys;
-    auto subtracted = corrected_sub - modulus;
+    auto subtracted = xs - ys;
     ys = (u64x4)__builtin_ia32_pblendvb256((c8x32)subtracted, (c8x32)corrected_sub, xs < ys);
 
     xs = res_xs;
