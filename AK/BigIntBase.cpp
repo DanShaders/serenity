@@ -446,65 +446,7 @@ static void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sp
 }
 
 template<SIMD::UnrollingMode unrolling_mode>
-static void __attribute__((target("avx2"))) nttm(size_t n, u64* a)
-{
-    PROFILER_SCOPE("nttm");
-
-    constexpr u64 reorder_bucket_size = 128;
-    constexpr u64 reorder_buckets = 64;
-    constexpr u64 reorder_buffer_size = reorder_bucket_size * reorder_buckets;
-
-    VERIFY(n % reorder_buffer_size == 0);
-
-    u64 reorder_buffer[2 * reorder_buffer_size] __attribute__((aligned(32)));
-
-    SIMD::u64x4 mask_load = { 0, 1, 2 * reorder_buckets, 2 * reorder_buckets + 1 };
-    SIMD::u64x4 mask_store = { 0, reorder_bucket_size, 2 * reorder_bucket_size, 3 * reorder_bucket_size };
-
-    for (u64 reorder_block = 0; reorder_block < n; reorder_block += reorder_buffer_size) {
-        for (u64 i = 0; i < reorder_bucket_size; i += 2) {
-            for (u64 bucket = 0; bucket < reorder_buckets; ++bucket) {
-                *((__m256i*)(reorder_buffer + bucket * reorder_bucket_size * 2 + i * 2)) = _mm256_i64gather_epi64((long long*)(a + 2 * (reorder_block + bucket + i * reorder_buckets)), (__m256i)mask_load, 8);
-            }
-        }
-
-        for (size_t log_len = 0; log_len < 6; log_len += 2) {
-            size_t total_len = one_sz << (6 - log_len - 1);
-            size_t total_len2 = one_sz << (6 - log_len - 2);
-
-            for (size_t i = 0; i < reorder_buckets; i += 2 * total_len) {
-                size_t shift1 = 3 * (reversed_bits_64[i & 63] << (6 - log_len - 1) & 63);
-                size_t shift2 = 3 * (reversed_bits_64[i & 63] << (6 - log_len - 2) & 63);
-                size_t shift3 = 3 * (reversed_bits_64[(i + total_len) & 63] << (6 - log_len - 2) & 63);
-                ntt_convolve2<unrolling_mode>(reorder_buffer, 2 * i * reorder_bucket_size, 2 * total_len2 * reorder_bucket_size, shift1, shift2, shift3);
-            }
-        }
-
-        for (u64 i = 0; i < reorder_buffer_size; ++i) {
-            reorder_buffer[i] = mod_mul(reorder_buffer[2 * i], reorder_buffer[2 * i + 1]);
-        }
-
-        for (u32 log_len = 0; log_len < 6; log_len += 2) {
-            u64 len = one_sz << log_len;
-            u64 total_len = len;
-
-            for (size_t i = 0; i < reorder_buckets; i += 4 * total_len) {
-                for (size_t j = i; j < i + total_len; ++j) {
-                    size_t shift1 = 3 * ((j - i) << (6 - log_len - 1) & 63);
-                    size_t shift2 = 3 * ((j - i) << (5 - log_len - 1) & 63);
-                    size_t shift3 = 3 * ((j - i + total_len) << (5 - log_len - 1) & 63);
-                    ntt_convolve3<unrolling_mode>(reorder_buffer, j * reorder_bucket_size, reorder_bucket_size, total_len * reorder_bucket_size, shift1, shift2, shift3);
-                }
-            }
-        }
-
-        for (u64 i = 0; i < reorder_bucket_size; ++i) {
-            for (u64 bucket = 0; bucket < reorder_buckets; bucket += 4) {
-                *(__m256i*)(a + reorder_block + bucket + i * reorder_buckets) = _mm256_i64gather_epi64((long long*)(reorder_buffer + bucket * reorder_bucket_size + i), (__m256i)mask_store, 8);
-            }
-        }
-    }
-}
+static void nttm(size_t n, u64* a);
 
 template<SIMD::UnrollingMode unrolling_mode>
 static void nttr(size_t k, size_t n, size_t n2, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, bool has_nttm)
@@ -998,6 +940,11 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_arbitrary2<SIMD::AVX2>(size_t from, 
         factor_idx += scale;
         factor_idx &= idx_mask;
 
+        AK::taint_for_optimizer(x0);
+        AK::taint_for_optimizer(x1);
+        AK::taint_for_optimizer(x2);
+        AK::taint_for_optimizer(x3);
+
         u64x4 low = { (u64)x0, (u64)x1, (u64)x2, (u64)x3 };
         u64x4 middle = { (u64)(x0 >> 64), (u64)(x1 >> 64), (u64)(x2 >> 64), (u64)(x3 >> 64) };
         u64x4 high = middle >> 32;
@@ -1015,6 +962,11 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_constant<SIMD::AVX2>(u64* a, size_t 
         auto x2 = static_cast<unsigned __int128>(a[i + 2]) * value;
         auto x3 = static_cast<unsigned __int128>(a[i + 3]) * value;
 
+        AK::taint_for_optimizer(x0);
+        AK::taint_for_optimizer(x1);
+        AK::taint_for_optimizer(x2);
+        AK::taint_for_optimizer(x3);
+
         u64x4 low = { (u64)x0, (u64)x1, (u64)x2, (u64)x3 };
         u64x4 middle = { (u64)(x0 >> 64), (u64)(x1 >> 64), (u64)(x2 >> 64), (u64)(x3 >> 64) };
         u64x4 high = middle >> 32;
@@ -1025,5 +977,63 @@ ALWAYS_INLINE TARGET_AVX2 void ntt_multiply_constant<SIMD::AVX2>(u64* a, size_t 
 
 template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*, bool);
 template TARGET_AVX2 void nttr<SIMD::AVX2>(size_t, size_t, size_t, u64*, u64*, u64*, u64*, bool);
+
+template<SIMD::UnrollingMode unrolling_mode>
+void __attribute__((target("avx2"))) nttm(size_t n, u64* a)
+{
+    using namespace SIMD;
+
+    PROFILER_SCOPE("nttm");
+
+    constexpr u64 reorder_bucket_size = 128;
+    constexpr u64 reorder_buckets = 64;
+    constexpr u64 reorder_buffer_size = reorder_bucket_size * reorder_buckets;
+
+    VERIFY(n % reorder_buffer_size == 0);
+
+    u64 reorder_buffer[2 * reorder_buffer_size] __attribute__((aligned(64)));
+
+    u64x4 mask_load = { 0, 1, 2 * reorder_buckets, 2 * reorder_buckets + 1 };
+    u64x4 mask_store = { 0, reorder_bucket_size, 2 * reorder_bucket_size, 3 * reorder_bucket_size };
+
+    for (u64 reorder_block = 0; reorder_block < n; reorder_block += reorder_buffer_size) {
+        for (u64 i = 0; i < reorder_bucket_size; i += 2) {
+            for (u64 bucket = 0; bucket < reorder_buckets; ++bucket) {
+                *((__m256i*)(reorder_buffer + bucket * reorder_bucket_size * 2 + i * 2)) = _mm256_i64gather_epi64((long long*)(a + 2 * (reorder_block + bucket + i * reorder_buckets)), (__m256i)mask_load, 8);
+            }
+        }
+
+        for (size_t log_len = 0; log_len < 6; ++log_len) {
+            size_t total_len = one_sz << (6 - log_len - 1);
+
+            for (size_t i = 0; i < reorder_buckets; i += 2 * total_len) {
+                size_t shift = 3 * (reversed_bits_64[i & 63] << (6 - log_len - 1) & 63);
+                ntt_convolve<unrolling_mode>(reorder_buffer, 2 * i * reorder_bucket_size, 2 * total_len * reorder_bucket_size, 2 * total_len * reorder_bucket_size, shift);
+            }
+        }
+
+        for (u64 i = 0; i < reorder_buffer_size; ++i) {
+            reorder_buffer[i] = mod_mul(reorder_buffer[2 * i], reorder_buffer[2 * i + 1]);
+        }
+
+        for (u32 log_len = 0; log_len < 6; ++log_len) {
+            u64 len = one_sz << log_len;
+            u64 total_len = len;
+
+            for (size_t i = 0; i < reorder_buckets; i += 2 * total_len) {
+                for (size_t j = i; j < i + total_len; ++j) {
+                    size_t shift = 3 * ((j - i) << (6 - log_len - 1) & 63);
+                    ntt_convolve<unrolling_mode>(reorder_buffer, j * reorder_bucket_size, reorder_bucket_size, total_len * reorder_bucket_size, shift);
+                }
+            }
+        }
+
+        for (u64 i = 0; i < reorder_bucket_size; ++i) {
+            for (u64 bucket = 0; bucket < reorder_buckets; bucket += 4) {
+                *(__m256i*)(a + reorder_block + bucket + i * reorder_buckets) = _mm256_i64gather_epi64((long long*)(reorder_buffer + bucket * reorder_bucket_size + i), (__m256i)mask_store, 8);
+            }
+        }
+    }
+}
 #endif
 }
