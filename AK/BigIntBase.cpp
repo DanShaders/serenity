@@ -208,34 +208,6 @@ ALWAYS_INLINE void shift_dispatch(Func func, size_t s0, SameAs<size_t> auto... s
     }
 }
 
-#if defined(AK_COMPILER_GCC) && ARCH(X86_64)
-// GCC currently produces much worse code than clang does (and the following is the clang's output)
-static u64 mod_reduce(u64 low, u64 middle, u64 high)
-{
-    u64 result;
-    u64 tmp;
-    asm(R"(
-        subq %3, %1
-        movabsq $-4294967296, %4
-        leaq 1(%1,%4), %3
-        cmovaeq %1, %3
-        movl %k2, %k0
-        shlq $32, %2
-        subq %0, %2
-        leaq (%3,%2), %0
-        cmpq %4, %0
-        movl $4294967295, %k4
-        leaq (%0,%4), %4
-        cmovaq %4, %0
-        addq %3, %2
-        cmovbq %4, %0
-    )"
-        : "=&r"(result), "+&r"(low), "+&r"(middle), "+&r"(high), "=&r"(tmp)
-        :
-        : "cc");
-    return result;
-}
-#else
 // This is the only code from the article. I do not know how to write the following 10 lines in a
 // different way, so the function is directly copied.
 static u64 mod_reduce(u64 low, u64 middle, u64 high)
@@ -250,7 +222,6 @@ static u64 mod_reduce(u64 low, u64 middle, u64 high)
         result -= modulus;
     return result;
 }
-#endif
 
 // (a * b) % modulus
 static ALWAYS_INLINE u64 mod_mul(u64 a, u64 b)
