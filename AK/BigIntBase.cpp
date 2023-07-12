@@ -119,68 +119,36 @@ OwnPtr<Profiler> global_profiler;
 #    define PROFILER_PRINT()
 #endif
 
-namespace AK::Detail {
-namespace {
 // TODO: update description
 
 // ===== Multiplication =====
 // Time complexity: O(n log n)
 //
-// On the algorithmic level, we do discrete Fourier transform over Z/modulus using mixed-radix
-// Cooley-Tukey FFT. Radix (`1 << inner_iters`) is 64 except for the first iteration of the main
-// loop (when it can be smaller in order to match `fft_length`). Multiplication by arbitrary
-// twiddle factors (happening between main loop iterations) is done in ntt_multiply_arbitrary.
-// It should be noted that we gather all of the required twiddle factors from twiddle_factors into
-// local_factors/twiddle_buffer to improve cache locality.
-// Twiddle factors of inner NTTs (of size 64 or less) are happen to be powers of 2. These NTTs are
-// located in ntt_* (top two loops) and ntt_*_convolve (SIMD-unrollable inner loop).
-//
 // Very high-level description of NTT for this particular modulus can be found at
 // https://cp4space.hatsya.com/2021/09/01/an-efficient-prime-for-number-theoretic-transforms/ .
+//
+// On the algorithmic level, we do discrete Fourier transform over Z/modulus using mixed-radix
+// Cooley-Tukey FFT. Radix (`1 << inner_iters`) is 64 (as opposed to 2 in naive implementations)
+// except for the second iteration of the loops in forward and backward NTTs (when it can be smaller
+// in order to match `n`).
+//
+// Multiplications by arbitrary twiddle factors (happening between some of the outer loops
+// iterations) are done in `ntt_multiply_arbitrary`, `ntt_multiply_arbitrary2` and
+// `ntt_multiply_constant`. It should be noted that we gather all of the required twiddle factors
+// from twiddle_factors into local_factors/twiddle_buffer to improve cache locality during
+// multiplication passes (except in ntt_multiply_constant, for obvious reasons).
+//
+// Twiddle factors of inner NTTs (of size 64 or less) happen to be the powers of 2. "Canonical"
+// butterfly transform is located in `ntt_convolve`. In the presence of SIMD unrolling, it is
+// beneficial to fuse convolution passes for the adjacent `log_len`s. This is done in
+// `ntt_convolve2` (for forward direction) and `ntt_convolve3` (for backward direction).
+// Unfortunately, compilers are still not smart enough to fuse these loops automatically (even if
+// leave the contents of `ntt_convolve\d` to be invocations of corresponding `ntt_convolve`).
 
-constexpr size_t one_sz = 1;
-
-constexpr u64 modulus = 0xffff'ffff'0000'0001ULL;
-
-// These are `2 ** i`-th roots of the unity modulo `modulus`
-constexpr u64 roots_of_unity[] = {
-    18446744069414584321ULL,
-    18446744069414584320ULL,
-    281474976710656ULL,
-    16777216ULL,
-    4096ULL,
-    64ULL,
-    8ULL,
-    2198989700608ULL,
-    14041890976876060974ULL,
-    14430643036723656017ULL,
-    4440654710286119610ULL,
-    8816101479115663336ULL,
-    10974926054405199669ULL,
-    1206500561358145487ULL,
-    10930245224889659871ULL,
-    3333600369887534767ULL,
-    15893793146607301539ULL,
-    14445062887364698470ULL,
-    12687654034874795207ULL,
-    4998280027294208343ULL,
-    2386580402828090423ULL,
-    14917392722903128661ULL,
-    14689788312086715899ULL,
-    14780543597221338054ULL,
-    14670161887888854203ULL,
-    17585967655187380175ULL,
-    2561969345295687999ULL,
-    3842056917760402699ULL,
-    9792270020272749848ULL,
-    7552600543241881301ULL,
-    8315689427686264475ULL,
-    7768485315656529096ULL,
-    16334397945464290598ULL,
-};
-
+namespace AK::Detail {
+namespace {
 // clang-format off
-constexpr size_t reversed_bits_64[] = {
+constexpr u32 reversed_bits_64[] = {
     0, 32, 16, 48, 8,  40, 24, 56, 4, 36, 20, 52, 12, 44, 28, 60,
     2, 34, 18, 50, 10, 42, 26, 58, 6, 38, 22, 54, 14, 46, 30, 62,
     1, 33, 17, 49, 9,  41, 25, 57, 5, 37, 21, 53, 13, 45, 29, 61,
@@ -193,30 +161,16 @@ u32 reverse_up_to_6_bits(u32 value, u32 bits)
     return reversed_bits_64[value] >> (6 - bits);
 }
 
-template<typename Func, size_t... shift_categories>
-ALWAYS_INLINE void shift_dispatch(Func func)
-{
-    func.template operator()<shift_categories...>();
-}
+constexpr u64 modulus = 0xffff'ffff'0000'0001ULL;
 
-template<typename Func, size_t... shift_categories>
-ALWAYS_INLINE void shift_dispatch(Func func, size_t s0, SameAs<size_t> auto... s)
-{
-    if (s0 == 0) {
-        shift_dispatch<Func, shift_categories..., 0>(func, s...);
-    } else if (s0 <= 32) {
-        shift_dispatch<Func, shift_categories..., 1>(func, s...);
-    } else if (s0 < 64) {
-        shift_dispatch<Func, shift_categories..., 2>(func, s...);
-    } else {
-        shift_dispatch<Func, shift_categories..., 3>(func, s...);
-    }
-}
-
-// This is the only code from the article. I do not know how to write the following 10 lines in a
-// different way, so the function is directly copied.
+// (low + (middle << 64) + (high << 96)) % modulus
+//
+// NOTE: This is the only code from the article. I do not know how to write the following 10 lines
+//       in a different way, so the function is directly copied.
 u64 mod_reduce(u64 low, u64 middle, u64 high)
 {
+    // VERIFY(middle < 1ULL << 32);
+
     u64 low2 = low - high;
     if (high > low)
         low2 += modulus;
@@ -247,6 +201,7 @@ u64 mod_sub(u64 a, u64 b)
     return a - b + (a < b ? modulus : 0);
 }
 
+// a_new = (a + b) % modulus, b_new = (a - b) % modulus
 void mod_add_sub(u64& a, u64& b)
 {
     u64 add = a + b - (b < modulus - a ? 0 : modulus);
@@ -255,53 +210,83 @@ void mod_add_sub(u64& a, u64& b)
     b = sub;
 }
 
-template<size_t sc>
-u64 mod_shift(u64 y, u64 shift)
+// Throughout FFT, we need to shift integers to the left by up to 95 bits and reduce them modulo
+// `modulus`. The algorithm of shifting and reducing itself is slightly different in these 4 cases.
+// Furthermore, we usually need to shift not one, but multiple integers by the same number of bits.
+// So, to achieve maximum efficiency, we generate copies of inner loops for each type of the shift.
+enum class ShiftType {
+    IDENTITY, // shift == 0
+    LQ_32,    // 0 < shift <= 32
+    LE_64,    // 32 < shift < 64
+    LE_96,    // 64 <= shift < 96
+};
+
+// This allows us to call functions, templated by ShiftType, cleanly.
+template<typename Func, ShiftType... shift_types>
+ALWAYS_INLINE auto shift_dispatch(Func func)
 {
-    if constexpr (sc == 0) {
-        return y;
-    } else if constexpr (sc == 1) {
-        return mod_reduce(y << shift, y >> (64 - shift), 0);
-    } else if constexpr (sc == 2) {
-        return mod_reduce(y << shift, static_cast<u32>(y >> (64 - shift)), y >> (96 - shift));
-    } else if constexpr (sc == 3) {
-        return mod_reduce(0, y << (shift - 64), y >> (96 - shift));
-    } else if constexpr (sc == 4) {
-        if (shift == 0) {
-            return mod_shift<0>(y, shift);
-        } else if (shift <= 32) {
-            return mod_shift<1>(y, shift);
-        } else if (shift < 64) {
-            return mod_shift<2>(y, shift);
-        } else {
-            return mod_shift<3>(y, shift);
-        }
+    return func.template operator()<shift_types...>();
+}
+
+template<typename Func, ShiftType... shift_types>
+ALWAYS_INLINE auto shift_dispatch(Func func, u32 current_shift, SameAs<u32> auto... remaining_shifts)
+{
+    if (current_shift == 0) {
+        return shift_dispatch<Func, shift_types..., ShiftType::IDENTITY>(func, remaining_shifts...);
+    } else if (current_shift <= 32) {
+        return shift_dispatch<Func, shift_types..., ShiftType::LQ_32>(func, remaining_shifts...);
+    } else if (current_shift < 64) {
+        return shift_dispatch<Func, shift_types..., ShiftType::LE_64>(func, remaining_shifts...);
     } else {
-        VERIFY_NOT_REACHED();
+        return shift_dispatch<Func, shift_types..., ShiftType::LE_96>(func, remaining_shifts...);
     }
 }
 
-template<SIMD::UnrollingMode>
-void ntt_convolve(u64* a, size_t j, size_t part_len, size_t total_len, size_t shift)
+// (a << shift) % modulus
+//
+// NOTE: We rely on the compiler to optimize away unnecessary checks in `mod_reduce` in the presence
+//       of the constant parameters.
+template<ShiftType shift_type>
+u64 mod_shift(u64 a, u32 shift)
 {
-    shift_dispatch([&]<size_t s> {
+    // VERIFY(shift < 96);
+
+    switch (shift_type) {
+    case ShiftType::IDENTITY:
+        return a;
+
+    case ShiftType::LQ_32:
+        return mod_reduce(a << shift, a >> (64 - shift), 0);
+
+    case ShiftType::LE_64:
+        return mod_reduce(a << shift, static_cast<u32>(a >> (64 - shift)), a >> (96 - shift));
+
+    case ShiftType::LE_96:
+        return mod_reduce(0, a << (shift - 64), a >> (96 - shift));
+    }
+}
+
+// The classical FFT's butterfly transform
+template<SIMD::UnrollingMode>
+ALWAYS_INLINE void ntt_convolve(u64* a, size_t j, size_t part_len, size_t total_len, size_t shift)
+{
+    shift_dispatch([&]<ShiftType shift_type> {
         for (size_t h = j; h < j + part_len; ++h) {
-            auto x = a[h], y = mod_shift<s>(a[h + total_len], shift);
+            auto x = a[h], y = mod_shift<shift_type>(a[h + total_len], shift);
             a[h] = mod_add(x, y), a[h + total_len] = mod_sub(x, y);
         }
     },
         shift);
 }
 
+// Fused two iterations of NTT in the forward direction, equivalent to the following three calls:
+//   ntt_convolve<unrolling_mode>(a, j, 2 * part_len, 2 * part_len, shift1);
+//   ntt_convolve<unrolling_mode>(a, j, part_len, part_len, shift2);
+//   ntt_convolve<unrolling_mode>(a, j + 2 * part_len, part_len, part_len, shift3);
 template<SIMD::UnrollingMode>
-void ntt_convolve2(u64* a, size_t j, size_t part_len, size_t shift1, size_t shift2, size_t shift3)
+void ntt_convolve2(u64* a, size_t j, size_t part_len, u32 shift1, u32 shift2, u32 shift3)
 {
-    // Fused two iterations of nttf, equivalent to the following three calls:
-    // ntt_convolve<unrolling_mode>(a, j, 2 * part_len, 2 * part_len, shift1);
-    // ntt_convolve<unrolling_mode>(a, j, part_len, part_len, shift2);
-    // ntt_convolve<unrolling_mode>(a, j + 2 * part_len, part_len, part_len, shift3);
-
-    shift_dispatch([&]<size_t s1, size_t s2, size_t s3> {
+    shift_dispatch([&]<ShiftType s1, ShiftType s2, ShiftType s3> {
         for (u64 h = 0; h < part_len; ++h) {
             auto x = a[j + h];
             auto y = a[j + h + part_len];
@@ -325,16 +310,15 @@ void ntt_convolve2(u64* a, size_t j, size_t part_len, size_t shift1, size_t shif
         shift1, shift2, shift3);
 }
 
+// Fused two iterations of NTT in the backward direction, equivalent to the following four calls:
+//   ntt_convolve<unrolling_mode>(a, j, part_len, total_len, shift1);
+//   ntt_convolve<unrolling_mode>(a, j + 2 * total_len, part_len, total_len, shift1);
+//   ntt_convolve<unrolling_mode>(a, j, part_len, 2 * total_len, shift2);
+//   ntt_convolve<unrolling_mode>(a, j + total_len, part_len, 2 * total_len, shift3);
 template<SIMD::UnrollingMode>
-void ntt_convolve3(u64* a, size_t j, size_t part_len, size_t total_len, size_t shift1, size_t shift2, size_t shift3)
+void ntt_convolve3(u64* a, size_t j, size_t part_len, size_t total_len, u32 shift1, u32 shift2, u32 shift3)
 {
-    // Fused two iterations of nttr, equivalent to the following four calls:
-    // ntt_convolve<unrolling_mode>(a, j, part_len, total_len, shift1);
-    // ntt_convolve<unrolling_mode>(a, j + 2 * total_len, part_len, total_len, shift1);
-    // ntt_convolve<unrolling_mode>(a, j, part_len, 2 * total_len, shift2);
-    // ntt_convolve<unrolling_mode>(a, j + total_len, part_len, 2 * total_len, shift3);
-
-    shift_dispatch([&]<size_t s1, size_t s2, size_t s3> {
+    shift_dispatch([&]<ShiftType s1, ShiftType s2, ShiftType s3> {
         for (u64 h = 0; h < part_len; ++h) {
             auto x = a[j + h];
             auto y = a[j + h + total_len];
@@ -433,12 +417,14 @@ void make_plan(u32& i, u32 l, u32 r, u32 log_len, PlanOptions const& options)
     }
 }
 
+constexpr size_t one_sz = 1;
+
 constexpr u32 reversed_idx_shift = 6;
 constexpr u32 twiddle_sparse_shift = 6;
 constexpr u32 nttm_iterations = 6;
 
 template<SIMD::UnrollingMode unrolling_mode, int interleaving>
-void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx, bool has_nttm)
+void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
 {
     PROFILER_SCOPE("nntf");
 
@@ -490,7 +476,7 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
             }
         }
 
-        if (has_nttm && outer_log_len + inner_iters == k) {
+        if (outer_log_len + inner_iters == k) {
             VERIFY(inner_iters == nttm_iterations);
             break;
         }
@@ -499,7 +485,7 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
         PROFILER_SCOPE("convolve");
 
         u32 plan_size = 0;
-        bool should_fuse = outer_log_len <= 6 && unrolling_mode != SIMD::NONE; // TODO
+        bool should_fuse = unrolling_mode != SIMD::NONE && outer_log_len <= 6; // TODO
         make_plan(plan_size, 0, 1 << inner_iters, 0, { .is_forward = true, .fuse_if_possible = should_fuse });
 
         u64 part_len = one_sz << (k - outer_log_len - inner_iters);
@@ -591,7 +577,7 @@ void nttm(size_t n, u64* a)
 }
 
 template<SIMD::UnrollingMode unrolling_mode>
-void nttr(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, bool has_nttm)
+void nttr(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer)
 {
     PROFILER_SCOPE("nttr");
 
@@ -606,7 +592,7 @@ void nttr(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
         // We've computed NTT of each consecutive block of `part_len` numbers.
         // Now we want to merge `parts` consecutive NTTs into one NTT of size `block_len`.
 
-        if (has_nttm && outer_log_len == 0) {
+        if (outer_log_len == 0) {
             VERIFY(inner_iters == nttm_iterations);
             outer_log_len += inner_iters;
             continue;
@@ -662,9 +648,9 @@ void nttr(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
                     current_len /= 2;
 
                     for (size_t part = 0; part < current_len; part += part_len) {
-                        size_t shift1 = 3 * (part >> outer_log_len << (7 - inner_iters + log_len));
-                        size_t shift2 = 3 * (part >> outer_log_len << (6 - inner_iters + log_len));
-                        size_t shift3 = 3 * ((part + current_len) >> outer_log_len << (6 - inner_iters + log_len));
+                        u32 shift1 = 3 * (part >> outer_log_len << (7 - inner_iters + log_len));
+                        u32 shift2 = 3 * (part >> outer_log_len << (6 - inner_iters + log_len));
+                        u32 shift3 = 3 * ((part + current_len) >> outer_log_len << (6 - inner_iters + log_len));
                         ntt_convolve3<unrolling_mode>(a, base + part, part_len, current_len, shift1, shift2, shift3);
                     }
                 }
@@ -673,6 +659,43 @@ void nttr(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
         outer_log_len += inner_iters;
     }
 }
+
+// These are `2 ** i`-th roots of the unity modulo `modulus`
+constexpr u64 roots_of_unity[] = {
+    18446744069414584321ULL,
+    18446744069414584320ULL,
+    281474976710656ULL,
+    16777216ULL,
+    4096ULL,
+    64ULL,
+    8ULL,
+    2198989700608ULL,
+    14041890976876060974ULL,
+    14430643036723656017ULL,
+    4440654710286119610ULL,
+    8816101479115663336ULL,
+    10974926054405199669ULL,
+    1206500561358145487ULL,
+    10930245224889659871ULL,
+    3333600369887534767ULL,
+    15893793146607301539ULL,
+    14445062887364698470ULL,
+    12687654034874795207ULL,
+    4998280027294208343ULL,
+    2386580402828090423ULL,
+    14917392722903128661ULL,
+    14689788312086715899ULL,
+    14780543597221338054ULL,
+    14670161887888854203ULL,
+    17585967655187380175ULL,
+    2561969345295687999ULL,
+    3842056917760402699ULL,
+    9792270020272749848ULL,
+    7552600543241881301ULL,
+    8315689427686264475ULL,
+    7768485315656529096ULL,
+    16334397945464290598ULL,
+};
 
 template<SIMD::UnrollingMode unrolling_mode>
 void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeWord const* data2, size_t size2, NativeWord* result, size_t size, NativeWord* buffer)
@@ -840,10 +863,8 @@ TARGET_AVX2 u64x4 mod_reduce_vec_128(u64x4 low, u64x4 middle, u64x4 high)
 }
 
 template TARGET_AVX2 void ntt_convolve<SIMD::AVX2>(u64* a, size_t j, size_t part_len, size_t total_len, size_t shift);
-
-template TARGET_AVX2 void ntt_convolve2<SIMD::AVX2>(u64* a, size_t j, size_t n, size_t shift1, size_t shift2, size_t shift3);
-
-template TARGET_AVX2 void ntt_convolve3<SIMD::AVX2>(u64* a, size_t j, size_t part_len, size_t total_len, size_t shift1, size_t shift2, size_t shift3);
+template TARGET_AVX2 void ntt_convolve2<SIMD::AVX2>(u64* a, size_t j, size_t n, u32 shift1, u32 shift2, u32 shift3);
+template TARGET_AVX2 void ntt_convolve3<SIMD::AVX2>(u64* a, size_t j, size_t part_len, size_t total_len, u32 shift1, u32 shift2, u32 shift3);
 
 // template TARGET_AVX2 void ntt_multiply_arbitrary<SIMD::AVX2, 1>(size_t from, size_t to, size_t scale, u64* a, u64* local_factors);
 
@@ -962,8 +983,8 @@ TARGET_AVX2 void ntt_multiply_constant<SIMD::AVX2>(u64* a, size_t from, size_t t
     }
 }
 
-template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*, bool);
-template TARGET_AVX2 void nttr<SIMD::AVX2>(size_t, size_t, u64*, u64*, u64*, u64*, bool);
+template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*);
+template TARGET_AVX2 void nttr<SIMD::AVX2>(size_t, size_t, u64*, u64*, u64*, u64*);
 template TARGET_AVX2 void nttm<SIMD::AVX2>(size_t, u64*);
 #endif
 }
