@@ -156,9 +156,11 @@ constexpr u32 reversed_bits_64[] = {
 };
 // clang-format on
 
-u32 reverse_up_to_6_bits(u32 value, u32 bits)
+u32 reverse_up_to_6_bits(u32 x, u32 num_bits_to_reverse)
 {
-    return reversed_bits_64[value] >> (6 - bits);
+    // VERIFY(num_bits_to_reverse <= 6);
+
+    return reversed_bits_64[x] >> (6 - num_bits_to_reverse);
 }
 
 constexpr u64 modulus = 0xffff'ffff'0000'0001ULL;
@@ -201,7 +203,7 @@ u64 mod_sub(u64 a, u64 b)
     return a - b + (a < b ? modulus : 0);
 }
 
-// a_new = (a + b) % modulus, b_new = (a - b) % modulus
+// a <- (a + b) % modulus, b <- (a - b) % modulus
 void mod_add_sub(u64& a, u64& b)
 {
     u64 add = a + b - (b < modulus - a ? 0 : modulus);
@@ -383,8 +385,9 @@ struct PlanItem {
 } plan[64];
 
 struct PlanOptions {
-    bool is_forward;
-    bool fuse_if_possible;
+    bool is_forward = true;
+    bool fuse_if_possible = true;
+    bool do_not_fuse_first = false;
 };
 
 void make_plan(u32& i, u32 l, u32 r, u32 log_len, PlanOptions const& options)
@@ -392,7 +395,7 @@ void make_plan(u32& i, u32 l, u32 r, u32 log_len, PlanOptions const& options)
     if (r - l == 1)
         return;
 
-    bool will_fuse = options.fuse_if_possible && (r - l > 2);
+    bool will_fuse = options.fuse_if_possible && (r - l > 2) && (!options.do_not_fuse_first || log_len);
 
     u32 part1 = (3 * l + r) / 4;
     u32 mid = (l + r) / 2;
@@ -424,7 +427,7 @@ constexpr u32 twiddle_sparse_shift = 6;
 constexpr u32 nttm_iterations = 6;
 
 template<SIMD::UnrollingMode unrolling_mode, int interleaving>
-void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
+void nttf(size_t k, size_t n, u64* a, size_t from, size_t to, u64* twiddle_start, u64* twiddle_sparse, u64* twiddle_buffer, NativeWord* reversed_idx)
 {
     PROFILER_SCOPE("nntf");
 
@@ -450,9 +453,9 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
                 VERIFY(inner_iters == nttm_iterations);
                 VERIFY(inner_iters >= reversed_idx_shift);
 
-                for (size_t i = 0; i < n; i += parts) {
+                for (size_t i = from; i < to; i += parts) {
                     size_t offset_in_part = reversed_idx[i >> inner_iters] >> inner_iters;
-                    ntt_multiply_arbitrary<unrolling_mode, interleaving>(i, i + parts, offset_in_part, a, twiddle_start);
+                    ntt_multiply_arbitrary<unrolling_mode, interleaving>(i - from, i - from + parts, offset_in_part, a, twiddle_start);
                 }
             } else {
                 VERIFY(shift >= twiddle_sparse_shift);
@@ -464,21 +467,21 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
                         local_factors[i] = twiddle_sparse[i << (shift - twiddle_sparse_shift)];
                 }
 
-                for (size_t i = 0; i < n; i += total_len) {
+                for (size_t i = from; i < to; i += total_len) {
                     size_t offset_in_part = reversed_idx[i >> (inner_iters + reversed_idx_shift)] >> (inner_iters + reversed_idx_shift) & (part_len - 1);
                     if (!offset_in_part)
                         continue;
 
                     for (size_t j = i, idx = 0; j < i + total_len; j += inner_len, (idx += offset_in_part) &= (n >> shift) - 1)
                         if (idx)
-                            ntt_multiply_constant<unrolling_mode>(a, interleaving * j, interleaving * (j + inner_len), local_factors[idx]);
+                            ntt_multiply_constant<unrolling_mode>(a, interleaving * (j - from), interleaving * (j - from + inner_len), local_factors[idx]);
                 }
             }
         }
 
         if (outer_log_len + inner_iters == k) {
             VERIFY(inner_iters == nttm_iterations);
-            break;
+            break; // `nttm` will do the rest
         }
 
         // Do NTTs of size `parts`
@@ -486,7 +489,8 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
 
         u32 plan_size = 0;
         bool should_fuse = unrolling_mode != SIMD::NONE && outer_log_len <= 6; // TODO
-        make_plan(plan_size, 0, 1 << inner_iters, 0, { .is_forward = true, .fuse_if_possible = should_fuse });
+
+        make_plan(plan_size, 0, 1 << inner_iters, 0, { .is_forward = true, .fuse_if_possible = should_fuse, .do_not_fuse_first = true });
 
         u64 part_len = one_sz << (k - outer_log_len - inner_iters);
         u64 block_len = part_len << inner_iters;
@@ -494,7 +498,17 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
             for (u32 plan_item = 0; plan_item < plan_size; ++plan_item) {
                 auto [l, r, log_len, fused] = plan[plan_item];
 
-                u64 current_offset = interleaving * (block + l * part_len);
+                if (outer_log_len == 0 && plan_item == 0)
+                    continue;
+
+                if (block + l * part_len < from || block + r * part_len > to)
+                    continue;
+
+                // if (!outer_log_len) {
+                //     dbgln("{} {} {} {}", l, r, log_len, fused);
+                // }
+
+                u64 current_offset = interleaving * (block + l * part_len - from);
                 u64 current_len = interleaving * (r - l) / 2 * part_len;
 
                 u32 shift1 = 3 * (reverse_up_to_6_bits(l, 6) << (inner_iters - log_len - 1));
@@ -507,6 +521,7 @@ void nttf(size_t k, size_t n, u64* a, u64* twiddle_start, u64* twiddle_sparse, u
                 }
             }
         }
+
         outer_log_len += inner_iters;
     }
 }
@@ -785,7 +800,7 @@ void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeWord con
         split_at(base, i < size1 ? data1[i] : 0);
         split_at(base + 1, i < size2 ? data2[i] : 0);
     }
-    memset(operands + base, 0, sizeof(NativeWord) * (buffer - operands - base));
+    memset(operands + base, 0, sizeof(NativeWord) * (n - base));
     PROFILER_POP_ENTRY();
 
     // Count reversed bit representations of indexes
@@ -804,7 +819,9 @@ void storage_mul_ntt_using(NativeWord const* data1, size_t size1, NativeWord con
     u64* twiddle_buffer = reinterpret_cast<u64*>(buffer);
 
     // Multiplication time has come.
-    nttf<unrolling_mode, 2>(k, n, operands, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
+    memcpy(operands + n, operands, sizeof(NativeWord) * n);
+    nttf<unrolling_mode, 2>(k, n, operands, 0, n / 2, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
+    nttf<unrolling_mode, 2>(k, n, operands + n, n / 2, n, twiddle_start, twiddle_sparse, twiddle_buffer, reversed_idx);
     nttm<unrolling_mode>(n, operands);
     nttr<unrolling_mode>(k, n, operands, twiddle_start, twiddle_sparse, twiddle_buffer);
 
@@ -983,7 +1000,7 @@ TARGET_AVX2 void ntt_multiply_constant<SIMD::AVX2>(u64* a, size_t from, size_t t
     }
 }
 
-template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, u64*, u64*, u64*, NativeWord*);
+template TARGET_AVX2 void nttf<SIMD::AVX2, 2>(size_t, size_t, u64*, size_t, size_t, u64*, u64*, u64*, NativeWord*);
 template TARGET_AVX2 void nttr<SIMD::AVX2>(size_t, size_t, u64*, u64*, u64*, u64*);
 template TARGET_AVX2 void nttm<SIMD::AVX2>(size_t, u64*);
 #endif
