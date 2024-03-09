@@ -43,6 +43,7 @@ void SpecificationClause::collect_into(TranslationUnitRef translation_unit)
     do_collect(translation_unit);
     for (auto& subclause : m_subclauses)
         subclause->collect_into(translation_unit);
+    leave();
 }
 
 Optional<FailedTextParseDiagnostic> SpecificationClause::parse_header(XML::Node const* element)

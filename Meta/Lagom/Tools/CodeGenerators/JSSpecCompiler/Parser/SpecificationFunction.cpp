@@ -85,9 +85,19 @@ void SpecificationFunction::do_collect(TranslationUnitRef translation_unit)
 {
     auto definition = make_ref_counted<FunctionDefinition>(m_declaration.release_value(), m_location, m_algorithm.tree());
     FunctionDeclarationRef declaration = definition;
-    translation_unit->adopt_function(move(definition));
 
     auto realm = context().translation_unit()->realm();
+
+    auto enclosing_type = context().enclosing_type();
+    if (!enclosing_type.has_value()) {
+        realm->diag().error(m_location,
+            "no enclosing type to assign function to");
+    } else {
+        enclosing_type.value()->assigned_functions().append({
+            .function = definition,
+            .is_abstract_operation = m_header.header.has<AbstractOperationDeclaration>(),
+        });
+    }
 
     m_header.header.visit(
         [&](OneOf<AccessorDeclaration, MethodDeclaration> auto const& accessor_or_method) {
@@ -125,6 +135,8 @@ void SpecificationFunction::do_collect(TranslationUnitRef translation_unit)
             VERIFY(result == HashSetResult::InsertedNewEntry);
         },
         [&](auto const&) {});
+
+    translation_unit->adopt_function(move(definition));
 }
 
 }

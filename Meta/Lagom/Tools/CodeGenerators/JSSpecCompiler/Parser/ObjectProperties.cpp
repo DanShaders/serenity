@@ -81,9 +81,11 @@ bool ObjectProperties::post_initialize(XML::Node const* element)
             return false;
         auto parent = *maybe_parent;
 
+        Runtime::Object* object;
+
         Runtime::PropertyKey key = Runtime::StringPropertyKey { name.last_component() };
         if (!parent->has(key)) {
-            auto object = Runtime::Object::create(realm);
+            object = Runtime::Object::create(realm);
             parent->set(key, Runtime::DataProperty {
                                  .value = object,
                                  .location = location,
@@ -104,9 +106,22 @@ bool ObjectProperties::post_initialize(XML::Node const* element)
             if (!init_or_check_intrinsic(object))
                 return false;
         }
+
+        m_enclosing_type = object->type().value();
     }
 
     return true;
+}
+
+void ObjectProperties::do_collect(TranslationUnitRef /*translation_unit*/)
+{
+    m_saved_enclosing_type = context().enclosing_type();
+    context().set_enclosing_type(m_enclosing_type);
+}
+
+void ObjectProperties::leave()
+{
+    context().set_enclosing_type(m_saved_enclosing_type);
 }
 
 }

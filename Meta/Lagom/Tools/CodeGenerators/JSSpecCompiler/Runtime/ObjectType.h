@@ -12,6 +12,11 @@ namespace JSSpecCompiler::Runtime {
 
 class ObjectType : public Cell {
 public:
+    struct AssignedFunction {
+        FunctionDeclarationRef function;
+        bool is_abstract_operation;
+    };
+
     static constexpr StringView TYPE_NAME = "type"sv;
 
     static ObjectType* create(Realm* realm)
@@ -21,11 +26,15 @@ public:
 
     StringView type_name() const override { return TYPE_NAME; }
 
+    auto& assigned_functions() { return m_assigned_functions; }
+
 protected:
     void do_dump(Printer& printer) const override;
 
 private:
     ObjectType() = default;
+
+    Vector<AssignedFunction> m_assigned_functions;
 };
 
 }

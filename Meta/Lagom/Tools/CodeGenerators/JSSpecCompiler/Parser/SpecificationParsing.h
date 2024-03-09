@@ -14,6 +14,7 @@
 #include "Forward.h"
 #include "Parser/TextParser.h"
 #include "Parser/Token.h"
+#include "Runtime/ObjectType.h"
 
 namespace JSSpecCompiler {
 
@@ -51,10 +52,14 @@ public:
     Location file_scope() const;
     Location location_from_xml_offset(LineTrackingLexer::Position position) const;
 
+    void set_enclosing_type(Optional<Runtime::ObjectType*> type) { m_enclosing_type = type; }
+    Optional<Runtime::ObjectType*> enclosing_type() { return m_enclosing_type; }
+
 private:
     TranslationUnitRef m_translation_unit;
     RefPtr<LogicalLocation> m_current_logical_scope;
     int m_step_list_nesting_level = 0;
+    Optional<Runtime::ObjectType*> m_enclosing_type;
 };
 
 class AlgorithmStepList {
@@ -113,6 +118,7 @@ public:
 protected:
     virtual bool post_initialize(XML::Node const* /*element*/) { return true; }
     virtual void do_collect(TranslationUnitRef /*translation_unit*/) { }
+    virtual void leave() { }
 
     SpecificationParsingContext& context() { return *m_ctx_pointer; }
 
@@ -159,6 +165,12 @@ public:
 
 protected:
     bool post_initialize(XML::Node const* element) override;
+    void do_collect(TranslationUnitRef translation_unit) override;
+    void leave() override;
+
+private:
+    Optional<Runtime::ObjectType*> m_saved_enclosing_type;
+    Runtime::ObjectType* m_enclosing_type;
 };
 
 class Specification {
