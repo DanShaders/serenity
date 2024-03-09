@@ -23,6 +23,7 @@ set(SOURCES
     Parser/SpecificationParsingStep.cpp
     Parser/TextParser.cpp
     Parser/XMLUtils.cpp
+    Runtime/NativeTypes.cpp
     Runtime/Object.cpp
     Runtime/ObjectType.cpp
     Runtime/Realm.cpp
