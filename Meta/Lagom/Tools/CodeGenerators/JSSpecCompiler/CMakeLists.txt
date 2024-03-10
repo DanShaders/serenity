@@ -10,6 +10,7 @@ set(SOURCES
     Compiler/Passes/IfBranchMergingPass.cpp
     Compiler/Passes/ReferenceResolvingPass.cpp
     Compiler/Passes/SSABuildingPass.cpp
+    Generator/Step.cpp
     Parser/Algorithm.cpp
     Parser/AlgorithmStep.cpp
     Parser/AlgorithmStepList.cpp

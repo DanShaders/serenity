@@ -15,6 +15,7 @@
 #include "Compiler/Passes/ReferenceResolvingPass.h"
 #include "Compiler/Passes/SSABuildingPass.h"
 #include "Function.h"
+#include "Generator/Step.h"
 #include "Parser/CppASTConverter.h"
 #include "Parser/SpecificationParsing.h"
 
@@ -119,6 +120,9 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     bool silence_diagnostics = false;
     args_parser.add_option(silence_diagnostics, "Silence all diagnostics.", "silence-diagnostics", 0);
 
+    ByteString output_directory;
+    args_parser.add_option(output_directory, "Write output to <directory>.", "output", 'o', "<directory>");
+
     args_parser.parse(arguments);
 
     CompilationPipeline pipeline;
@@ -132,6 +136,9 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     pipeline.add_compilation_pass<CFGSimplificationPass>();
     pipeline.add_compilation_pass<SSABuildingPass>();
     pipeline.add_compilation_pass<DeadCodeEliminationPass>();
+
+    if (!output_directory.is_empty())
+        pipeline.add_step(adopt_own_if_nonnull(new Generator::Step(output_directory)));
 
     pipeline.for_each_step_in(passes_to_dump_ast, [](CompilationStepWithDumpOptions& step) {
         step.dump_ast = true;
