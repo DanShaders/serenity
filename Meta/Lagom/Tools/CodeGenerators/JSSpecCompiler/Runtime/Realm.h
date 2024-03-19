@@ -9,6 +9,7 @@
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Vector.h>
 
+#include "Function.h"
 #include "Runtime/Cell.h"
 
 namespace JSSpecCompiler::Runtime {
@@ -27,6 +28,8 @@ public:
     }
 
     DiagnosticEngine& diag() { return m_diag; }
+
+    Optional<Runtime::Object*> create_object_chain(QualifiedName const& name, Location location);
 
 private:
     DiagnosticEngine& m_diag;

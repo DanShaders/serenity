@@ -156,6 +156,9 @@ public:
         : SpecificationClause(move(clause))
     {
     }
+
+protected:
+    bool post_initialize(XML::Node const* element) override;
 };
 
 class Specification {
