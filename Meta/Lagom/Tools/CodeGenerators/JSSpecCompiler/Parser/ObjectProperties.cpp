@@ -24,7 +24,7 @@ bool ObjectProperties::post_initialize(XML::Node const* element)
             return false;
         auto object = *maybe_object;
 
-        auto instance_type = Runtime::ObjectType::create(realm);
+        auto instance_type = Runtime::ObjectType::create(realm, QualifiedName { header.name });
 
         Runtime::PropertyKey key = Runtime::WellKnownSymbol::InstanceType;
         Runtime::Property value = Runtime::DataProperty {
@@ -72,6 +72,7 @@ bool ObjectProperties::post_initialize(XML::Node const* element)
                         .value = Runtime::Enum<Runtime::ObjectCategory>::create(realm, category),
                         .location = location,
                     });
+                object->type() = Runtime::ObjectType::create(realm, move(name));
             }
             return true;
         };

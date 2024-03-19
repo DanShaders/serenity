@@ -19,21 +19,27 @@ public:
 
     static constexpr StringView TYPE_NAME = "type"sv;
 
-    static ObjectType* create(Realm* realm)
+    static ObjectType* create(Realm* realm, QualifiedName&& name)
     {
-        return realm->adopt_cell(new ObjectType {});
+        return realm->adopt_cell(new ObjectType { move(name) });
     }
 
     StringView type_name() const override { return TYPE_NAME; }
 
     auto& assigned_functions() { return m_assigned_functions; }
 
+    QualifiedName& name() { return m_name; }
+
 protected:
     void do_dump(Printer& printer) const override;
 
 private:
-    ObjectType() = default;
+    ObjectType(QualifiedName&& name)
+        : m_name(move(name))
+    {
+    }
 
+    QualifiedName m_name;
     Vector<AssignedFunction> m_assigned_functions;
 };
 
