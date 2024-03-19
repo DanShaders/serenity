@@ -9,6 +9,16 @@
 
 namespace JSSpecCompiler::Runtime {
 
+StringView to_string(Runtime::ObjectCategory category)
+{
+    if (category == Runtime::ObjectCategory::Constructor)
+        return "Constructor"sv;
+    else if (category == Runtime::ObjectCategory::Prototype)
+        return "Prototype"sv;
+    else
+        VERIFY_NOT_REACHED();
+}
+
 Optional<DataProperty&> Property::get_data_property_or_diagnose(Realm* realm, QualifiedName name, Location current_location)
 {
     if (!has<DataProperty>()) {

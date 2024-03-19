@@ -28,6 +28,7 @@ struct StringPropertyKey {
 
 #define ENUMERATE_WELL_KNOWN_SYMBOLS(F) \
     F(InstanceType, _instanceType)      \
+    F(ObjectCategory, _objectCategory)  \
     F(ToStringTag, toStringTag)
 
 enum class WellKnownSymbol {
@@ -35,6 +36,14 @@ enum class WellKnownSymbol {
     ENUMERATE_WELL_KNOWN_SYMBOLS(ID)
 #undef ID
 };
+
+enum class ObjectCategory {
+    Constructor,
+    Prototype,
+    InstanceType,
+};
+
+StringView to_string(Runtime::ObjectCategory category);
 
 class PropertyKey : public Variant<Slot, StringPropertyKey, WellKnownSymbol> {
 public:
@@ -94,6 +103,12 @@ public:
     }
 
     Optional<DataProperty&> get_data_property_or_diagnose(Realm* realm, QualifiedName name, Location location);
+
+    template<typename T>
+    T* as_data_property_with()
+    {
+        return get<DataProperty>().as<T>();
+    }
 };
 
 class Object : public Runtime::Cell {
