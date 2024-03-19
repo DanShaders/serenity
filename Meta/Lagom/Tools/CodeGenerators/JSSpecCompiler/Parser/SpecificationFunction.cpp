@@ -7,6 +7,9 @@
 #include "Parser/Lexer.h"
 #include "Parser/SpecificationParsing.h"
 #include "Parser/XMLUtils.h"
+#include "Runtime/NativeTypes.h"
+#include "Runtime/Object.h"
+#include "Runtime/Realm.h"
 
 namespace JSSpecCompiler {
 
@@ -80,7 +83,48 @@ bool SpecificationFunction::post_initialize(XML::Node const* element)
 
 void SpecificationFunction::do_collect(TranslationUnitRef translation_unit)
 {
-    translation_unit->adopt_function(make_ref_counted<FunctionDefinition>(m_declaration.release_value(), m_location, m_algorithm.tree()));
+    auto definition = make_ref_counted<FunctionDefinition>(m_declaration.release_value(), m_location, m_algorithm.tree());
+    FunctionDeclarationRef declaration = definition;
+    translation_unit->adopt_function(move(definition));
+
+    auto realm = context().translation_unit()->realm();
+
+    m_header.header.visit(
+        [&](OneOf<AccessorDeclaration, MethodDeclaration> auto const& accessor_or_method) {
+            auto maybe_object = realm->create_object_chain(accessor_or_method.name.without_last_component(), m_location);
+            if (!maybe_object.has_value())
+                return;
+            auto object = *maybe_object;
+
+            Runtime::PropertyKey key = Runtime::StringPropertyKey { accessor_or_method.name.last_component() };
+            auto& properties = object->properties();
+
+            if (object->has(key)) {
+                realm->diag().error(m_location,
+                    "property {} is redefined", accessor_or_method.name.to_string());
+                realm->diag().note(object->get(key).location(),
+                    "previously defined here");
+                return;
+            }
+
+            HashSetResult result;
+            if constexpr (SameAs<decltype(accessor_or_method), AccessorDeclaration const&>) {
+                result = properties.set(key,
+                    Runtime::AccessorProperty {
+                        .getter = declaration,
+                        .setter = {},
+                        .location = m_location,
+                    });
+            } else {
+                result = properties.set(key,
+                    Runtime::DataProperty {
+                        .value = Runtime::Function::create(realm, declaration),
+                        .location = m_location,
+                    });
+            }
+            VERIFY(result == HashSetResult::InsertedNewEntry);
+        },
+        [&](auto const&) {});
 }
 
 }
