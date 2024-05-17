@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <AK/AsyncBitStream.h>
+#include <AK/AsyncStreamTransform.h>
 #include <AK/BitStream.h>
 #include <AK/ByteBuffer.h>
 #include <AK/CircularBuffer.h>
@@ -14,6 +16,8 @@
 #include <AK/Forward.h>
 #include <AK/MaybeOwned.h>
 #include <AK/Stream.h>
+#include <AK/StreamBuffer.h>
+#include <AK/StreamTranslator.h>
 #include <AK/Vector.h>
 #include <LibCompress/DeflateTables.h>
 
@@ -22,7 +26,9 @@ namespace Compress {
 class CanonicalCode {
 public:
     CanonicalCode() = default;
+
     ErrorOr<u32> read_symbol(LittleEndianInputBitStream&) const;
+    ErrorOr<u32> read_symbol(BufferBitView& bit_view) const;
     ErrorOr<void> write_symbol(LittleEndianOutputBitStream&, u32) const;
 
     static CanonicalCode const& fixed_literal_codes();
@@ -62,73 +68,42 @@ ALWAYS_INLINE ErrorOr<void> CanonicalCode::write_symbol(LittleEndianOutputBitStr
     return {};
 }
 
-class DeflateDecompressor final : public Stream {
-private:
-    class CompressedBlock {
-    public:
-        CompressedBlock(DeflateDecompressor&, CanonicalCode literal_codes, Optional<CanonicalCode> distance_codes);
-
-        ErrorOr<bool> try_read_more();
-
-    private:
-        bool m_eof { false };
-
-        DeflateDecompressor& m_decompressor;
-        CanonicalCode m_literal_codes;
-        Optional<CanonicalCode> m_distance_codes;
-    };
-
-    class UncompressedBlock {
-    public:
-        UncompressedBlock(DeflateDecompressor&, size_t);
-
-        ErrorOr<bool> try_read_more();
-
-    private:
-        DeflateDecompressor& m_decompressor;
-        size_t m_bytes_remaining;
-    };
-
-    enum class State {
-        Idle,
-        ReadingCompressedBlock,
-        ReadingUncompressedBlock
-    };
-
+class AsyncDeflateDecompressor final : public AsyncStreamTransform<AsyncInputLittleEndianBitStream> {
 public:
-    friend CompressedBlock;
-    friend UncompressedBlock;
+    AsyncDeflateDecompressor(MaybeOwned<AsyncInputStream>&& input);
 
-    static ErrorOr<NonnullOwnPtr<DeflateDecompressor>> construct(MaybeOwned<LittleEndianInputBitStream> stream);
-    ~DeflateDecompressor();
-
-    virtual ErrorOr<Bytes> read_some(Bytes) override;
-    virtual ErrorOr<size_t> write_some(ReadonlyBytes) override;
-    virtual bool is_eof() const override;
-    virtual bool is_open() const override;
-    virtual void close() override;
-
-    static ErrorOr<ByteBuffer> decompress_all(ReadonlyBytes);
+    ReadonlyBytes buffered_data_unchecked(Badge<AsyncInputStream>) const override;
+    void dequeue(Badge<AsyncInputStream>, size_t bytes) override;
 
 private:
-    DeflateDecompressor(MaybeOwned<LittleEndianInputBitStream> stream, CircularBuffer buffer);
+    Generator decompress();
 
-    ErrorOr<u32> decode_length(u32);
-    ErrorOr<u32> decode_distance(u32);
-    ErrorOr<void> decode_codes(CanonicalCode& literal_code, Optional<CanonicalCode>& distance_code);
+    StreamSeekbackBuffer m_buffer;
+};
 
-    static constexpr u16 max_back_reference_length = 258;
+class DeflateDecompressor final : public AsyncToSyncInputStreamTranslator<AsyncDeflateDecompressor> {
+public:
+    DeflateDecompressor(MaybeOwned<AsyncInputStream>&& stream)
+        : AsyncToSyncInputStreamTranslator(make<AsyncDeflateDecompressor>(move(stream)))
+    {
+    }
 
-    bool m_read_final_block { false };
+    DeflateDecompressor(MaybeOwned<Stream>&& stream)
+        : AsyncToSyncInputStreamTranslator(
+              make<AsyncDeflateDecompressor>(
+                  make<SyncToAsyncInputStreamTranslator<Stream>>(
+                      move(stream))))
+    {
+    }
 
-    State m_state { State::Idle };
-    union {
-        CompressedBlock m_compressed_block;
-        UncompressedBlock m_uncompressed_block;
-    };
+    // FIXME: This API is a backwards-compatible deprecated complete mess. Prefer constructors in
+    //        new code.
+    static ErrorOr<NonnullOwnPtr<DeflateDecompressor>> construct(MaybeOwned<LittleEndianInputBitStream> stream)
+    {
+        return make<DeflateDecompressor>(move(stream));
+    }
 
-    MaybeOwned<LittleEndianInputBitStream> m_input_stream;
-    CircularBuffer m_output_buffer;
+    static ErrorOr<ByteBuffer> decompress_all(ReadonlyBytes bytes);
 };
 
 class DeflateCompressor final : public Stream {
