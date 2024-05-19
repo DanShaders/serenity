@@ -1,4 +1,9 @@
 set(SOURCES
+<<<<<<< HEAD
+=======
+    AsyncDeflate.cpp
+    AsyncZlib.cpp
+>>>>>>> 2f9ab3d685 (LibCompress: Add asynchronous zlib decompressor)
     Brotli.cpp
     BrotliDictionary.cpp
     Deflate.cpp
