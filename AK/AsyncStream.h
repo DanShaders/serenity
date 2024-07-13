@@ -11,6 +11,8 @@
 
 namespace AK {
 
+inline constexpr size_t PREFERRED_CHUNK_SIZE = 131072;
+
 // AsyncInputStream is a base class for all asynchronous input streams. Refer to
 // AsynchronousDesign.md documentation page for a description tailored for users of the streams.
 //
@@ -178,4 +180,5 @@ using AK::AsyncConnection;
 using AK::AsyncInputStream;
 using AK::AsyncOutputStream;
 using AK::AsyncResource;
+using AK::PREFERRED_CHUNK_SIZE;
 #endif
