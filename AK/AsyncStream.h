@@ -14,6 +14,8 @@
 
 namespace AK {
 
+inline constexpr size_t PREFERRED_CHUNK_SIZE = 65536;
+
 // AsyncResource represents a generic resource (e. g. POSIX file descriptor, AsyncStream, HTTP
 // response body) with a failible and/or asynchronous destructor. Refer to AsynchronousDesign.md
 // documentation page for a description tailored for users of the asynchronous resources.
@@ -223,5 +225,6 @@ using AK::AsyncInputStream;
 using AK::AsyncOutputStream;
 using AK::AsyncResource;
 using AK::AsyncStream;
+using AK::PREFERRED_CHUNK_SIZE;
 using AK::StreamWrapper;
 #endif
