@@ -103,97 +103,9 @@ private:
     bool m_is_open { true };
 };
 
-class AsyncStreamPair final : public AsyncStream {
-public:
-    AsyncStreamPair(NonnullOwnPtr<AsyncInputStream>&& input_stream, NonnullOwnPtr<AsyncOutputStream>&& output_stream)
-        : m_input_stream(move(input_stream))
-        , m_output_stream(move(output_stream))
-    {
-    }
-
-    ~AsyncStreamPair()
-    {
-        if (is_open())
-            reset();
-    }
-
-    void reset() override
-    {
-        VERIFY(is_open());
-        m_input_stream->reset();
-        m_output_stream->reset();
-        m_is_open = false;
-    }
-
-    Coroutine<ErrorOr<void>> close() override
-    {
-        VERIFY(is_open());
-        m_is_open = false;
-
-        auto result = co_await m_input_stream->close();
-        if (result.is_error()) {
-            m_output_stream->reset();
-            co_return result;
-        }
-        CO_TRY(co_await m_output_stream->close());
-        co_return {};
-    }
-
-    bool is_open() const override
-    {
-        return m_is_open;
-    }
-
-    Coroutine<ErrorOr<bool>> enqueue_some(Badge<AsyncInputStream>) override
-    {
-        auto result = co_await m_input_stream->enqueue_some(badge());
-        if (result.is_error()) {
-            m_is_open = false;
-            m_output_stream->reset();
-        }
-        co_return result;
-    }
-
-    ReadonlyBytes buffered_data_unchecked(Badge<AsyncInputStream>) const override
-    {
-        return m_input_stream->buffered_data_unchecked(badge());
-    }
-
-    void dequeue(Badge<AsyncInputStream>, size_t bytes) override
-    {
-        m_input_stream->dequeue(badge(), bytes);
-    }
-
-    Coroutine<ErrorOr<size_t>> write_some(ReadonlyBytes buffer) override
-    {
-        auto result = co_await m_output_stream->write_some(buffer);
-        if (result.is_error()) {
-            m_is_open = false;
-            m_input_stream->reset();
-        }
-        co_return result;
-    }
-
-    Coroutine<ErrorOr<void>> write(ReadonlySpan<ReadonlyBytes> buffers) override
-    {
-        auto result = co_await m_output_stream->write(buffers);
-        if (result.is_error()) {
-            m_is_open = false;
-            m_input_stream->reset();
-        }
-        co_return result;
-    }
-
-private:
-    NonnullOwnPtr<AsyncInputStream> m_input_stream;
-    NonnullOwnPtr<AsyncOutputStream> m_output_stream;
-    bool m_is_open { true };
-};
-
 }
 
 #ifdef USING_AK_GLOBALLY
 using AK::AsyncInputStreamSlice;
 using AK::AsyncStreamHelpers;
-using AK::AsyncStreamPair;
 #endif
