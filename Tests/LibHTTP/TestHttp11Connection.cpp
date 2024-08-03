@@ -72,8 +72,7 @@ ASYNC_TEST_CASE(unit_tests_single)
 
         auto output_ref = output.ptr();
 
-        auto stream_pair = make<AsyncStreamPair>(move(input), move(output));
-        auto connection = make<HTTP::Http11Connection>(move(stream_pair));
+        auto connection = make<HTTP::Http11Connection>(AsyncConnection { move(input), move(output) });
 
         CO_TRY_OR_FAIL(co_await connection->request(
             {

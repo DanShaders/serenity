@@ -152,35 +152,25 @@ public:
 using AsyncOutputStream = HybridOutputStream<Paradigm::Async>;
 using SyncOutputStream = HybridOutputStream<Paradigm::Sync>;
 
-class AsyncStream
-    : public AsyncInputStream
-    , public AsyncOutputStream {
-public:
-    AsyncStream() = default;
-};
-
-template<typename T>
-class StreamWrapper : public virtual AsyncResource {
-public:
-    StreamWrapper(NonnullOwnPtr<T>&& stream)
-        : m_stream(move(stream))
+template<DerivedFrom<AsyncInputStream> InputStream = AsyncInputStream, DerivedFrom<AsyncOutputStream> OutputStream = AsyncOutputStream>
+struct AsyncConnection {
+    operator AsyncConnection<>() &&
     {
+        return {
+            input.template release_nonnull<AsyncInputStream>(),
+            output.template release_nonnull<AsyncOutputStream>(),
+        };
     }
 
-    void reset() override { return m_stream->reset(); }
-    Coroutine<ErrorOr<void>> close() override { return m_stream->close(); }
-    bool is_open() const override { return m_stream->is_open(); }
-
-protected:
-    NonnullOwnPtr<T> m_stream;
+    NonnullOwnPtr<InputStream> input;
+    NonnullOwnPtr<OutputStream> output;
 };
 
 }
 
 #ifdef USING_AK_GLOBALLY
+using AK::AsyncConnection;
 using AK::AsyncInputStream;
 using AK::AsyncOutputStream;
 using AK::AsyncResource;
-using AK::AsyncStream;
-using AK::StreamWrapper;
 #endif
