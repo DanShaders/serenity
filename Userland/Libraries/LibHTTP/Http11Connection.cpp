@@ -7,6 +7,7 @@
 #include <AK/AsyncStreamHelpers.h>
 #include <AK/AsyncStreamTransform.h>
 #include <AK/GenericLexer.h>
+#include <AK/ScopeGuard.h>
 #include <AK/StreamBuffer.h>
 #include <LibHTTP/Http11Connection.h>
 
@@ -51,7 +52,7 @@ struct StatusCodeAndHeaders {
     Vector<Header> headers;
 };
 
-Coroutine<ErrorOr<StatusCodeAndHeaders>> receive_response_headers(AsyncStream& stream)
+Coroutine<ErrorOr<StatusCodeAndHeaders>> receive_response_headers(AsyncInputStream& stream)
 {
     auto status_line = CO_TRY(co_await AsyncStreamHelpers::consume_until(stream, "\r\n"sv));
 
@@ -154,20 +155,26 @@ private:
 
 }
 
-Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> Http11Response::create(Badge<Http11Connection>, RequestData&& data, AsyncStream& stream)
+Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> Http11Response::create(Badge<Http11Connection>, RequestData&& data, AsyncConnection<>& connection)
 {
-    auto header = format_request(data);
+    {
+        ArmedScopeGuard input_resetter = [&] { connection.input->reset(); };
 
-    if (data.body.has<Empty>()) {
-        CO_TRY(co_await stream.write({ { header } }));
-    } else if (data.body.has<RequestData::PlainBody>()) {
-        auto& body = data.body.get<RequestData::PlainBody>().data;
-        CO_TRY(co_await stream.write({ { header, body.bytes() } }));
-    } else {
-        VERIFY_NOT_REACHED();
+        auto header = format_request(data);
+        if (data.body.has<Empty>()) {
+            CO_TRY(co_await connection.output->write({ { header } }));
+        } else if (data.body.has<RequestData::PlainBody>()) {
+            auto& body = data.body.get<RequestData::PlainBody>().data;
+            CO_TRY(co_await connection.output->write({ { header, body.bytes() } }));
+        } else {
+            VERIFY_NOT_REACHED();
+        }
+
+        input_resetter.disarm();
     }
 
-    auto [status_code, headers] = CO_TRY(co_await receive_response_headers(stream));
+    ArmedScopeGuard output_resetter = [&] { connection.output->reset(); };
+    auto [status_code, headers] = CO_TRY(co_await receive_response_headers(*connection.input));
 
     Optional<size_t> content_length;
     Optional<StringView> transfer_encoding;
@@ -182,17 +189,19 @@ Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> Http11Response::create(Badge<H
     OwnPtr<AsyncInputStream> body;
     if (transfer_encoding.has_value()) {
         if (transfer_encoding.value() != "chunked"sv) {
-            stream.reset();
+            connection.input->reset();
             co_return Error::from_string_literal("Unsupported 'Transfer-Encoding'");
         }
-        body = make<ChunkedBodyStream>(stream);
+        body = make<ChunkedBodyStream>(*connection.input);
     } else {
         if (!content_length.has_value()) {
-            stream.reset();
+            connection.input->reset();
             co_return Error::from_string_literal("'Content-Length' must be provided");
         }
-        body = make<AsyncInputStreamSlice>(stream, content_length.value());
+        body = make<AsyncInputStreamSlice>(*connection.input, content_length.value());
     }
+
+    output_resetter.disarm();
 
     co_return adopt_own(*new (nothrow) Http11Response(body.release_nonnull(), status_code, move(headers)));
 }
