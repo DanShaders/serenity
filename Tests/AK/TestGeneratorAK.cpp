@@ -6,6 +6,7 @@
 
 #include <AK/Generator.h>
 #include <LibTest/AsyncTestCase.h>
+#include <LibTest/TestCase.h>
 
 namespace {
 
@@ -51,4 +52,46 @@ ASYNC_TEST_CASE(sync_order)
 
     EXPECT_EQ(order, (Vector<int> { 1, 2, 3, 4, 5, 6, 7, 8 }));
     co_return;
+}
+
+namespace {
+
+SyncGenerator<int, Empty> generate_really_sync(Vector<int>& order)
+{
+    ScopeGuard guard = [&] {
+        order.append(7);
+    };
+
+    order.append(2);
+    co_yield 1;
+    order.append(4);
+    co_yield 2;
+    order.append(6);
+    co_return {};
+}
+
+}
+
+TEST_CASE(really_sync_order)
+{
+    Vector<int> order;
+
+    auto gen = generate_really_sync(order);
+    EXPECT(!gen.is_done());
+
+    order.append(1);
+
+    auto result1 = gen.next();
+    order.append(3);
+    EXPECT_EQ(result1, 1);
+
+    auto result2 = gen.next();
+    order.append(5);
+    EXPECT_EQ(result2, 2);
+
+    auto end = gen.next();
+    order.append(8);
+    EXPECT_EQ(end, Empty {});
+
+    EXPECT_EQ(order, (Vector<int> { 1, 2, 3, 4, 5, 6, 7, 8 }));
 }
