@@ -93,12 +93,14 @@ ASYNC_TEST_CASE(input_unexpected_operations)
 {
     {
         Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Close, { 5 });
+        co_await stream.reset();
     }
     VERIFY(Test::current_test_result() == Test::TestResult::Failed);
     Test::set_current_test_result(Test::TestResult::NotRun);
 
     {
         Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 5 });
+        co_await stream.reset();
     }
     VERIFY(Test::current_test_result() == Test::TestResult::NotRun);
 
@@ -117,21 +119,20 @@ ASYNC_TEST_CASE(input_unexpected_operations)
     VERIFY(Test::current_test_result() == Test::TestResult::Failed);
     Test::set_current_test_result(Test::TestResult::NotRun);
 
-    {
-        Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 1, 1, 1, 1, 1 });
-        stream.reset();
-    }
-    VERIFY(Test::current_test_result() == Test::TestResult::NotRun);
+    EXPECT_CRASH("no_close_or_reset", [] -> Test::Crash::Failure {
+        [[maybe_unused]] Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 5 });
+        return Test::Crash::Failure::DidNotCrash;
+    });
 }
 
-ASYNC_TEST_CASE(input_reset_during_wait)
+ASYNC_TEST_CASE(input_cancel_during_wait)
 {
     Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 0, 5 });
 
     auto read_coro = stream.read(5);
     EXPECT(!read_coro.await_ready());
 
-    stream.reset();
+    stream.cancel();
 
     auto error = co_await read_coro;
     EXPECT_EQ(error.error().code(), ECANCELED);
@@ -178,8 +179,8 @@ TEST_CASE(input_crash)
         auto coro = [] -> Coroutine<void> {
             Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 5 });
 
-            CO_TRY_OR_FAIL(co_await stream.peek_or_eof());
-            CO_TRY_OR_FAIL(co_await stream.peek_or_eof());
+            EXPECT(!CO_TRY_OR_FAIL(co_await stream.peek_or_eof()).is_eof);
+            EXPECT(CO_TRY_OR_FAIL(co_await stream.peek_or_eof()).is_eof);
             CO_TRY_OR_FAIL(co_await stream.read(4));
             _exit(0);
         };

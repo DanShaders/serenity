@@ -14,10 +14,11 @@ namespace AK {
 // AsyncInputStream is a base class for all asynchronous input streams. Refer to
 // AsynchronousDesign.md documentation page for a description tailored for users of the streams.
 //
-// In order to implement a brand new AsyncInputStream, you generally have to define a destructor and
-// overload six virtual functions: 3 from AsyncResource and 3 from AsyncInputStream. When
-// implementing the AsyncResource interface, please note that AsyncInputStream is considered clean
-// if there's no data left to be read.
+// Please note that inheriting directly from HybridInputStream is almost never required. However, if
+// you decide to do so, you generally have to define a destructor and overload seven virtual
+// functions: 4 from HybridResource and 3 from HybridInputStream. When implementing the
+// HybridResource interface, please note that the input stream is considered clean if there's no
+// data left to be read.
 template<Paradigm paradigm>
 class HybridInputStream : public virtual HybridResource<paradigm> {
 public:
@@ -56,7 +57,7 @@ public:
         return [](auto& self) -> CoroutineFacade<paradigm, ErrorOr<ReadonlyBytes>> {
             auto [data, is_eof] = CO_TRY(co_await self.peek_or_eof());
             if (is_eof) {
-                self.reset();
+                co_await self.reset();
                 co_return Error::from_errno(EIO);
             }
             co_return data;
@@ -72,7 +73,7 @@ public:
                 auto buffer = self.buffered_data();
                 while (buffer.size() < bytes) {
                     if (!CO_TRY(co_await self.enqueue_some({}))) {
-                        self.reset();
+                        co_await self.reset();
                         co_return Error::from_errno(EIO);
                     }
                     buffer = self.buffered_data_unchecked({});
@@ -103,20 +104,24 @@ public:
     // stream to the internal buffer and return true. Otherwise, it must not change the buffer and
     // return false. If read fails and, consequently, `enqueue_some` returns Error, it must
     // perform Reset AO (or an equivalent of it). Therefore, all reading errors are considered fatal
-    // for AsyncInputStream. Additionally, implementation must assert if `enqueue_some` is called
-    // concurrently. This is the only method that can be interrupted by `reset`.
+    // for HybridInputStream. Additionally, implementation must assert if `enqueue_some` is called
+    // concurrently. You should implement enqueue_some so that it correctly interoperates with
+    // `HybridResource::cancel`.
+    //
+    // enqueue_some should assert if another asynchronous operation is in progress. Additionally,
+    // this is the only function allowed to invalidate views returned from buffered_data_unchecked.
     virtual WrapIntoCoroutine<paradigm, ErrorOr<bool>> enqueue_some(Badge<HybridInputStream>) = 0;
 
-    // `buffered_data_unchecked` should just return a view of the buffer. It must not invalidate
-    // previously returned views of the buffer.
+    // `buffered_data_unchecked` should just return a view of the buffer. It need not to assert
+    // any state validness.
     virtual ReadonlyBytes buffered_data_unchecked(Badge<HybridInputStream>) const = 0;
 
     // `dequeue` should remove `bytes` bytes from the buffer. It is guaranteed that this amount of
     // bytes will be present in the buffer at the point of the call. `dequeue` must not invalidate
     // previously returned views of the buffer. There are some restrictions on `bytes` parameter
-    // originating from the length condition (see documentation), so if you just use
-    // AsyncStreamBuffer as the stream buffer, `dequeue` and `enqueue_some` will have amortized
-    // O(stream_length) complexity.
+    // originating from the length condition (see documentation), so if you just use StreamBuffer
+    // as the stream buffer, `dequeue` and `enqueue_some` will have amortized O(stream_length)
+    // complexity.
     virtual void dequeue(Badge<HybridInputStream>, size_t bytes) = 0;
 
 protected:
