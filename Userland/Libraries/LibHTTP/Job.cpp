@@ -34,8 +34,14 @@ struct SyncStreamAsyncWrapper final : public AsyncInputStream {
     {
     }
 
-    virtual void reset() override
+    virtual void cancel() override
     {
+        VERIFY_NOT_REACHED();
+    }
+
+    virtual Coroutine<void> reset() override
+    {
+        co_return;
     }
 
     virtual Coroutine<ErrorOr<void>> close() override

@@ -5,6 +5,7 @@
  */
 
 #include <AK/Random.h>
+#include <AK/TemporaryChange.h>
 #include <LibTest/AsyncTestStreams.h>
 
 namespace Test {
@@ -51,12 +52,7 @@ AsyncMemoryInputStream::AsyncMemoryInputStream(StringView data, StreamCloseExpec
 
 AsyncMemoryInputStream::~AsyncMemoryInputStream()
 {
-    // 1. Assert that nobody is awaiting on the resource.
-    VERIFY(!m_awaiter);
-
-    // 2. If resource is open, perform Reset AO.
-    if (is_open())
-        reset();
+    VERIFY(!is_open() && !m_has_awaiters);
 
     if (m_expectation == StreamCloseExpectation::Reset) {
         EXPECT(m_is_reset);
@@ -67,45 +63,33 @@ AsyncMemoryInputStream::~AsyncMemoryInputStream()
     }
 }
 
-void AsyncMemoryInputStream::reset()
+void AsyncMemoryInputStream::cancel()
 {
-    // 1. Assert that the resource is open.
+    if (!is_open())
+        return;
+
+    m_is_cancelled = true;
+}
+
+Coroutine<void> AsyncMemoryInputStream::reset()
+{
+    auto _ = guard_async_method();
+
     VERIFY(is_open());
-
-    // 2. Perform Reset AO.
-    //     1. Schedule returning an error (preferably, ECANCELED) from the current resource awaiters.
-    //     2. Ensure that further attempts to wait on a resource will assert.
     m_is_reset = true;
-
-    //     3. Free synchronously the associated low-level resource.
-
-    //     4. Return synchronously.
+    co_return;
 }
 
 Coroutine<ErrorOr<void>> AsyncMemoryInputStream::close()
 {
-    // 1. Assert that the object is fully constructed.
-    // 2. Assert that the resource is open.
-    VERIFY(is_open());
+    auto _ = guard_async_method();
 
-    // 3. Perform Close AO, await and return its result.
-    //     1. Assert that nobody is awaiting on a resource.
-    VERIFY(!m_awaiter);
-
-    //     3. Shutdown (possibly asynchronously) the associated low-level resource.
-
-    //     4. Check if the state of the resource is clean. If it is not, call Reset AO and return an
-    //        error (preferably, EBUSY).
     if (m_read_head != m_data.length()) {
-        reset();
+        m_is_reset = true;
         co_return Error::from_errno(EBUSY);
     }
 
-    //     2. Ensure that further attempts to wait on a resource will assert.
     m_is_closed = true;
-
-    //     5. Free (possibly asynchronously) the associated low-level resource.
-    //     6. Return success.
     co_return {};
 }
 
@@ -116,14 +100,23 @@ bool AsyncMemoryInputStream::is_open() const
 
 Coroutine<ErrorOr<bool>> AsyncMemoryInputStream::enqueue_some(Badge<AsyncInputStream>)
 {
+    auto _ = guard_async_method();
+
+    if (m_is_cancelled) {
+        m_is_reset = true;
+        co_return Error::from_errno(ECANCELED);
+    }
+
     if (m_next_chunk_index == m_chunks.size()) {
         m_last_enqueue = m_peek_head;
         co_return false;
     }
 
     co_await Spinner { m_awaiter };
-    if (m_is_reset)
+    if (m_is_cancelled) {
+        m_is_reset = true;
         co_return Error::from_errno(ECANCELED);
+    }
 
     m_last_enqueue = m_peek_head;
     m_peek_head = m_chunks[m_next_chunk_index++];
@@ -148,8 +141,7 @@ AsyncMemoryOutputStream::AsyncMemoryOutputStream(StreamCloseExpectation expectat
 
 AsyncMemoryOutputStream::~AsyncMemoryOutputStream()
 {
-    if (is_open())
-        reset();
+    VERIFY(!is_open());
 
     if (m_expectation == StreamCloseExpectation::Reset) {
         EXPECT(m_is_reset);
@@ -160,10 +152,19 @@ AsyncMemoryOutputStream::~AsyncMemoryOutputStream()
     }
 }
 
-void AsyncMemoryOutputStream::reset()
+void AsyncMemoryOutputStream::cancel()
+{
+    if (!is_open())
+        return;
+
+    m_is_cancelled = true;
+}
+
+Coroutine<void> AsyncMemoryOutputStream::reset()
 {
     VERIFY(is_open());
     m_is_reset = true;
+    co_return;
 }
 
 Coroutine<ErrorOr<void>> AsyncMemoryOutputStream::close()

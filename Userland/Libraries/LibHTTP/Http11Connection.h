@@ -16,7 +16,7 @@
 namespace HTTP {
 
 class Http11Connection;
-class Http11Response;
+struct Http11Response;
 
 #define ENUMERATE_METHODS(F) \
     F(Invalid)               \
@@ -52,30 +52,12 @@ struct RequestData {
     Variant<Empty, PlainBody> body = Empty {};
 };
 
-class Http11Response final : public AsyncResource {
-public:
+struct Http11Response {
     static Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> create(Badge<Http11Connection>, RequestData&& data, AsyncConnection<>& connection);
 
-    void reset() override { return m_body->reset(); }
-    Coroutine<ErrorOr<void>> close() override { return m_body->close(); }
-    bool is_open() const override { return m_body->is_open(); }
-
-    u16 status_code() const { return m_status_code; }
-    Vector<Header> const& headers() const { return m_headers; }
-
-    AsyncInputStream& body() { return *m_body; }
-
-private:
-    Http11Response(NonnullOwnPtr<AsyncInputStream>&& body, u16 status_code, Vector<Header>&& headers)
-        : m_body(move(body))
-        , m_status_code(status_code)
-        , m_headers(move(headers))
-    {
-    }
-
-    NonnullOwnPtr<AsyncInputStream> m_body;
-    u16 m_status_code { 0 };
-    Vector<Header> m_headers;
+    NonnullOwnPtr<AsyncInputStream> body;
+    u16 status_code { 0 };
+    Vector<Header> headers;
 };
 
 class Http11Connection final : public AsyncResource {
@@ -88,36 +70,41 @@ public:
 
     ~Http11Connection()
     {
-        VERIFY(!m_request_in_flight);
-        if (is_open())
-            reset();
+        VERIFY(!is_open() && !m_has_awaiters);
     }
 
-    void reset() override
+    virtual void cancel() override
     {
         VERIFY(!m_in_critical_section);
-        // Unless Http11Connection is in a critical section, the connection is never in an
-        // (observable) half-open state.
-        m_connection.input->reset();
-        m_connection.output->reset();
+        m_connection.input->cancel();
+        m_connection.output->cancel();
     }
 
-    Coroutine<ErrorOr<void>> close() override
+    virtual Coroutine<void> reset() override
     {
-        VERIFY(!m_request_in_flight);
+        auto _ = guard_async_method();
+
+        // Unless another operation is in progress, the connection is never in an half-open state.
+        co_await m_connection.input->reset();
+        co_await m_connection.output->reset();
+    }
+
+    virtual Coroutine<ErrorOr<void>> close() override
+    {
+        auto _ = guard_async_method();
+
         auto maybe_error = co_await m_connection.input->close();
         if (maybe_error.is_error()) {
-            m_connection.output->reset();
+            co_await m_connection.output->reset();
             co_return maybe_error;
         }
         co_return co_await m_connection.output->close();
     }
 
-    bool is_open() const override
+    virtual bool is_open() const override
     {
-        VERIFY(!m_in_critical_section);
-
         bool result = m_connection.input->is_open();
+        // This is only true if !m_has_awaiters. We leverage UB allowed by the interface here.
         VERIFY(result == m_connection.output->is_open());
         return result;
     }
@@ -127,34 +114,25 @@ public:
         typename T = InvokeResult<Func, Http11Response&>::ReturnType::ResultType>
     Coroutine<ErrorOr<T>> request(RequestData&& data, Func&& func)
     {
-        VERIFY(!m_request_in_flight);
-        TemporaryChange request_in_flight { m_request_in_flight, true };
+        auto _ = guard_async_method();
 
         auto response = CO_TRY(co_await Http11Response::create({}, move(data), m_connection));
 
         // After this point, Http11Response instance is only responsible for resetting the reading
         // end of the connection and, consequently, Http11Connection enters a critical section (as
         // it can't maintain half-openness invariant anymore).
-        TemporaryChange in_critical_section { m_in_critical_section, true };
-
+        m_in_critical_section = true;
         auto result = co_await func(*response);
+        m_in_critical_section = false;
 
-        VERIFY(response->is_open() == !result.is_error());
-        if (result.is_error()) {
-            m_connection.output->reset();
-        } else {
-            auto maybe_error = co_await response->close();
-            if (maybe_error.is_error()) {
-                m_connection.output->reset();
-                result = maybe_error.release_error();
-            }
-        }
+        VERIFY(!response->body->is_open());
+        if (result.is_error())
+            co_await m_connection.output->reset();
         co_return result;
     }
 
 private:
     AsyncConnection<> m_connection;
-    bool m_request_in_flight { false };
     bool m_in_critical_section { false };
 };
 
