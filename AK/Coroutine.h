@@ -64,6 +64,31 @@ struct ValueHolder {
 
 template<>
 struct ValueHolder<void> { };
+
+template<typename T>
+inline constexpr bool IsSynchronouslyAwaitable = false;
+
+template<typename T>
+inline constexpr bool IsSynchronouslyAwaitable<TryAwaiter<T>> = true;
+
+template<typename U>
+struct WrapIntoAwaitable {
+    using PointerType = RemoveReference<U>*;
+
+public:
+    WrapIntoAwaitable(PointerType expression)
+        : m_expression(expression)
+    {
+    }
+
+    bool await_ready() const { return true; }
+    void await_suspend(std::coroutine_handle<>) { VERIFY_NOT_REACHED(); }
+    [[nodiscard]] U&& await_resume() { return static_cast<U&&>(*m_expression); }
+
+private:
+    PointerType m_expression;
+};
+
 }
 
 template<typename T>
@@ -187,6 +212,144 @@ private:
 };
 
 template<typename T>
+class FakeCoroutine : private Detail::ValueHolder<T> {
+    struct CoroutinePromiseVoid;
+    struct CoroutinePromiseValue;
+
+    AK_MAKE_NONCOPYABLE(FakeCoroutine);
+
+public:
+    using ReturnType = T;
+    using promise_type = Conditional<SameAs<T, void>, CoroutinePromiseVoid, CoroutinePromiseValue>;
+
+    ~FakeCoroutine()
+    {
+        VERIFY(await_ready());
+        if constexpr (!IsVoid<T>)
+            return_value()->~T();
+        if (m_handle)
+            m_handle.destroy();
+    }
+
+    FakeCoroutine(FakeCoroutine&& other)
+    {
+        m_handle = AK::exchange(other.m_handle, {});
+        VERIFY(await_ready());
+        if constexpr (!IsVoid<T>)
+            new (return_value()) T(move(*other.return_value()));
+    }
+
+    FakeCoroutine& operator=(FakeCoroutine&& other)
+    {
+        if (this != &other) {
+            this->~FakeCoroutine();
+            new (this) FakeCoroutine(move(other));
+        }
+        return *this;
+    }
+
+    bool await_ready() const
+    {
+        VERIFY(!m_handle || m_handle.done());
+        return true;
+    }
+
+    void await_suspend(std::coroutine_handle<>)
+    {
+        VERIFY_NOT_REACHED();
+    }
+
+    [[nodiscard]] decltype(auto) await_resume()
+    {
+        if constexpr (SameAs<T, void>)
+            return;
+        else
+            return static_cast<T&&>(*return_value());
+    }
+
+    operator decltype(auto)()
+    {
+        VERIFY(await_ready());
+        return await_resume();
+    }
+
+private:
+    template<typename U>
+    friend struct Detail::TryAwaiter;
+
+    // You cannot just have return_value and return_void defined in the same promise type because C++.
+    struct CoroutinePromiseBase {
+        CoroutinePromiseBase() = default;
+
+        FakeCoroutine get_return_object()
+        {
+            return { std::coroutine_handle<promise_type>::from_promise(*static_cast<promise_type*>(this)) };
+        }
+
+        Detail::SuspendNever initial_suspend() { return {}; }
+        Detail::SuspendAlways final_suspend() noexcept { return {}; }
+
+        void unhandled_exception() = delete;
+
+        template<typename U>
+        decltype(auto) await_transform(U&& expression)
+        {
+            if constexpr (Detail::IsSynchronouslyAwaitable<RemoveCVReference<U>>)
+                return forward<U>(expression);
+            else
+                return Detail::WrapIntoAwaitable<U> { &expression };
+        }
+
+        FakeCoroutine* m_coroutine { nullptr };
+    };
+
+    struct CoroutinePromiseValue : CoroutinePromiseBase {
+        template<typename U>
+        requires IsConstructible<T, U>
+        void return_value(U&& returned_object)
+        {
+            new (this->m_coroutine->return_value()) T(forward<U>(returned_object));
+        }
+
+        void return_value(T&& returned_object)
+        {
+            new (this->m_coroutine->return_value()) T(move(returned_object));
+        }
+    };
+
+    struct CoroutinePromiseVoid : CoroutinePromiseBase {
+        void return_void() { }
+    };
+
+    FakeCoroutine(std::coroutine_handle<promise_type>&& handle)
+        : m_handle(move(handle))
+    {
+        m_handle.promise().m_coroutine = this;
+    }
+
+    T* return_value()
+    {
+        return reinterpret_cast<T*>(this->m_return_value);
+    }
+
+    std::coroutine_handle<promise_type> m_handle;
+};
+
+template<typename T>
+inline constexpr bool Detail::IsSynchronouslyAwaitable<FakeCoroutine<T>> = true;
+
+enum class Paradigm {
+    Async,
+    Sync,
+};
+
+template<Paradigm paradigm, typename T>
+using WrapIntoCoroutine = Conditional<paradigm == Paradigm::Async, Coroutine<T>, T>;
+
+template<Paradigm paradigm, typename T>
+using CoroutineFacade = Conditional<paradigm == Paradigm::Async, Coroutine<T>, FakeCoroutine<T>>;
+
+template<typename T>
 T must_sync(Coroutine<ErrorOr<T>>&& coroutine)
 {
     VERIFY(coroutine.await_ready());
@@ -221,7 +384,6 @@ struct TryAwaiter {
         if (!m_expression->is_error()) {
             return handle;
         } else {
-            auto awaiter = handle.promise().m_awaiter;
             auto* coroutine = handle.promise().m_coroutine;
             using ReturnType = RemoveReference<decltype(*coroutine)>::ReturnType;
             static_assert(IsSpecializationOf<ReturnType, ErrorOr>,
@@ -236,8 +398,11 @@ struct TryAwaiter {
             handle.destroy();
 
             // Lastly, transfer control to the parent (or nothing, if parent is not yet suspended).
-            if (awaiter)
-                return awaiter;
+            if constexpr (requires { handle.promise().m_awaiter; }) {
+                auto awaiter = handle.promise().m_awaiter;
+                if (awaiter)
+                    return awaiter;
+            }
             return std::noop_coroutine();
         }
     }
