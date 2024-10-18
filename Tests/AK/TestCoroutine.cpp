@@ -268,6 +268,11 @@ Coroutine<ErrorOr<void>> co_try_fail_async()
     CO_TRY(co_await co_try_fail_inner());
     co_return {};
 }
+
+Coroutine<ErrorOr<void>> co_try_fail_async_outer()
+{
+    co_return co_await co_try_fail_async();
+}
 }
 
 TEST_CASE(co_try)
@@ -286,6 +291,11 @@ TEST_CASE(co_try)
         auto result = Core::run_async_in_new_event_loop(co_try_fail_async);
         EXPECT(result.is_error());
     }
+
+    {
+        auto result = Core::run_async_in_new_event_loop(co_try_fail_async_outer);
+        EXPECT(result.is_error());
+    }
 }
 
 namespace {
@@ -297,4 +307,154 @@ TEST_CASE(move_void_coroutine)
     auto void_coro = nothing();
     auto moved = move(void_coro);
     EXPECT(moved.await_ready());
+}
+
+namespace {
+AK::FakeCoroutine<void> fake_innermost(Vector<int>& order)
+{
+    order.append(1);
+    co_return;
+}
+
+AK::FakeCoroutine<void> fake_inner(Vector<int>& order)
+{
+    order.append(3);
+    ScopeGuard _ = [&] { order.append(2); };
+    co_await fake_innermost(order);
+    order.append(4);
+    co_await fake_innermost(order);
+    order.append(5);
+}
+
+int meaning_of_life()
+{
+    return 42;
+}
+
+AK::FakeCoroutine<int> fake_basic(Vector<int>& order)
+{
+    order.append(6);
+    co_await fake_inner(order);
+    order.append(7);
+    co_return co_await meaning_of_life();
+}
+}
+
+TEST_CASE(fake_basic)
+{
+    Vector<int> order;
+    auto coro = fake_basic(order);
+    VERIFY(coro.await_ready());
+    EXPECT_EQ(coro.await_resume(), 42);
+    EXPECT_EQ(order, (Vector<int> { 6, 3, 1, 4, 1, 5, 2, 7 }));
+}
+
+namespace {
+ErrorOr<int> gimme_int(bool should_error)
+{
+    if (should_error)
+        return Error::from_errno(ENOMEM);
+    return 42;
+}
+
+AK::FakeCoroutine<ErrorOr<int>> fake_try_fail()
+{
+    CO_TRY(gimme_int(true));
+    co_return 0;
+}
+
+AK::FakeCoroutine<ErrorOr<int>> fake_try_ok()
+{
+    int value = CO_TRY(gimme_int(false));
+    co_return value;
+}
+}
+
+TEST_CASE(fake_try)
+{
+    auto wrapped_error = fake_try_fail();
+    VERIFY(wrapped_error.await_ready());
+    auto error = wrapped_error.await_resume();
+    EXPECT(error.is_error() && error.error().code() == ENOMEM);
+
+    auto wrapped_42 = fake_try_ok();
+    VERIFY(wrapped_42.await_ready());
+    EXPECT_EQ(wrapped_42.await_resume().release_value(), 42);
+}
+
+namespace {
+AK::FakeCoroutine<Class> gimme_class()
+{
+    co_return Class {};
+}
+
+AK::FakeCoroutine<Class> gimme_class_but_await_it_first()
+{
+    co_return co_await Class {};
+}
+
+AK::FakeCoroutine<ErrorOr<void>> unwrap_using_co_try()
+{
+    auto expression = ErrorOr<Class> { Class {} };
+    auto c = CO_TRY(move(expression));
+#ifndef AK_COROUTINE_DESTRUCTION_BROKEN
+    EXPECT_EQ(c.cookie(), 3);
+#else
+    EXPECT_EQ(c.cookie(), 4);
+#endif
+    co_return {};
+}
+}
+
+TEST_CASE(fake_move_count)
+{
+    {
+        auto c = gimme_class().await_resume();
+        // 1. Construct temporary as an argument for return_value.
+        // 2. Move this temporary into FakeCoroutine's storage.
+        // 3. Move class from FakeCoroutine to c.
+        EXPECT_EQ(c.cookie(), 3);
+    }
+
+    {
+        auto c = gimme_class();
+        auto d = move(c);
+        EXPECT_EQ(d.await_resume().cookie(), 3);
+    }
+
+    {
+        auto c = gimme_class_but_await_it_first();
+        EXPECT_EQ(c.await_resume().cookie(), 2);
+    }
+
+    {
+        auto c = unwrap_using_co_try();
+        EXPECT(!c.await_resume().is_error());
+    }
+}
+
+TEST_CASE(wrap_into_awaitable)
+{
+    [] -> AK::FakeCoroutine<void> {
+        int a = 0;
+
+        {
+            decltype(auto) ref = co_await static_cast<int&>(a);
+            static_assert(SameAs<decltype(ref), int&>);
+        }
+        {
+            decltype(auto) ref = co_await static_cast<int&&>(a);
+            static_assert(SameAs<decltype(ref), int&&>);
+        }
+        {
+            decltype(auto) ref = co_await static_cast<int const&>(a);
+            static_assert(SameAs<decltype(ref), int const&>);
+        }
+        {
+            decltype(auto) ref = co_await static_cast<int const&&>(a);
+            static_assert(SameAs<decltype(ref), int const&&>);
+        }
+
+        co_return;
+    }();
 }
