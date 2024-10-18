@@ -42,6 +42,20 @@ It might be tempting to just do nothing with a stream in this situation. However
 
 As mentioned in the previous paragraph, in addition to `close` and `reset` methods, resources have an `is_open` method which checks if the resource has already been closed or reset (either explicitly or implicitly by a failed method). `is_open` state cannot change by itself with time (i. e. if a server sends RST when nobody is listening the socket)&mdash;one has to call a method on a resource for `open` state to change.
 
+Some actions on resources cause them to enter a critical section. If a resource is in a critical section, you cannot control its openness via calls to `close` and `reset` methods and there are usually additional constraints on allowed interactions with a resource. For example, when you access an underlying stream of `AsyncLittleEndianBitReader` using `with_underlying`,
+
+```cpp
+Coroutine<ErrorOr<void>> access_very_meaningful_data(AsyncLittleEndianBitReader& reader) {
+    CO_TRY(co_await reader.with_underlying([](AsyncInputStream& stream) -> Coroutine<ErrorOr<void>> {
+        consume_object(CO_TRY(co_await stream.read_object<VeryImportantObject>()));
+        co_return {};
+    }));
+    co_return {};
+}
+```
+
+the method call causes `reader` to enter a critical section for the duration of the provided lambda. In this particular case, during normal operation, the reader instance must maintain additional buffers to allow reading byte-unaligned data which it, obviously, can't do when the direct access to the underlying stream is granted.
+
 ## Input streams
 
 `AK::AsyncInputStream` is a base class for all asynchronous input streams.
