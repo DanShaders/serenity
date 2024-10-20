@@ -48,6 +48,7 @@ class SearchableCircularBuffer;
 class SeekableStream;
 class StackInfo;
 class Stream;
+class StreamBuffer;
 class String;
 class StringBuilder;
 class StringImpl;

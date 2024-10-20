@@ -89,64 +89,48 @@ Coroutine<ErrorOr<StatusCodeAndHeaders>> receive_response_headers(AsyncInputStre
     };
 }
 
-class ChunkedBodyStream final : public AsyncStreamTransform<AsyncInputStream> {
+class ChunkedBodyStream final : public AsyncStreamTransform<StreamBuffer> {
 public:
     ChunkedBodyStream(AsyncInputStream& stream)
-        : AsyncStreamTransform(MaybeOwned { stream }, generate())
+        : AsyncStreamTransform(MaybeOwned { stream })
     {
     }
 
-    ReadonlyBytes buffered_data_unchecked(Badge<AsyncInputStream>) const override
-    {
-        return m_buffer.data();
-    }
-
-    void dequeue(Badge<AsyncInputStream>, size_t bytes) override
-    {
-        m_buffer.dequeue(bytes);
-    }
-
-private:
-    Generator generate()
+protected:
+    virtual Coroutine<ErrorOr<void>> generate() override
     {
         while (true) {
-            auto line = CO_TRY(co_await AsyncStreamHelpers::consume_until(*m_stream, "\r\n"sv));
+            auto line = CO_TRY(co_await AsyncStreamHelpers::consume_until(m_stream, "\r\n"sv));
 
             auto lexer = GenericLexer { line };
             auto length_or_error = lexer.consume_decimal_integer<size_t>();
-            if (length_or_error.is_error()) {
-                co_await m_stream->reset();
+            if (length_or_error.is_error())
                 co_return Error::from_string_literal("Invalid chunk length");
-            }
-            if (!lexer.consume_specific("\r\n")) {
-                co_await m_stream->reset();
+            if (!lexer.consume_specific("\r\n"))
                 co_return Error::from_string_literal("Expected \\r\\n after chunk length");
-            }
             VERIFY(lexer.is_eof());
+
             size_t chunk_length = length_or_error.release_value();
             bool is_last_chunk = chunk_length == 0;
 
             while (chunk_length > 0) {
-                auto data = CO_TRY(co_await m_stream->peek());
+                auto data = CO_TRY(co_await m_stream.peek());
                 size_t to_copy = min(data.size(), chunk_length);
                 // FIXME: We can reuse the buffer of the underlying stream if our reading frame doesn't span
                 //        multiple chunks.
-                m_buffer.append(must_sync(m_stream->read(to_copy)));
+                CO_TRY(co_await with_buffer([&](StreamBuffer& buffer) {
+                    buffer.append(must_sync(m_stream.read(to_copy)));
+                }));
                 chunk_length -= to_copy;
-                co_yield {};
             }
 
-            if (CO_TRY(co_await m_stream->read(2)) != "\r\n"sv.bytes()) {
-                co_await m_stream->reset();
+            if (CO_TRY(co_await m_stream.read(2)) != "\r\n"sv.bytes())
                 co_return Error::from_string_literal("Expected \\r\\n after a chunk");
-            }
 
             if (is_last_chunk)
                 co_return {};
         }
     }
-
-    StreamBuffer m_buffer;
 };
 
 }

@@ -91,6 +91,52 @@ private:
 
 }
 
+class SuspendFrame {
+public:
+    // Suspends the current frame and writes the handle to it to `handle_to_suspend`.
+    SuspendFrame(std::coroutine_handle<>& handle_to_suspend)
+        : m_handle_to_suspend(handle_to_suspend)
+    {
+    }
+
+    bool await_ready() { return false; }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle)
+    {
+        m_handle_to_suspend = handle;
+        return {};
+    }
+
+    void await_resume() { m_handle_to_suspend = {}; }
+
+private:
+    std::coroutine_handle<>& m_handle_to_suspend;
+};
+
+class SwapFrames {
+public:
+    // Resumes `handle_to_resume`, writes the current (suspended) frame into `handle_to_suspend`.
+    SwapFrames(std::coroutine_handle<> handle_to_resume, std::coroutine_handle<>& handle_to_suspend)
+        : m_handle_to_resume(handle_to_resume)
+        , m_handle_to_suspend(handle_to_suspend)
+    {
+    }
+
+    bool await_ready() { return false; }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle)
+    {
+        m_handle_to_suspend = handle;
+        return m_handle_to_resume ? m_handle_to_resume : std::noop_coroutine();
+    }
+
+    void await_resume() { m_handle_to_suspend = {}; }
+
+private:
+    std::coroutine_handle<> m_handle_to_resume;
+    std::coroutine_handle<>& m_handle_to_suspend;
+};
+
 template<typename T>
 class [[nodiscard]] Coroutine : private Detail::ValueHolder<T> {
     struct CoroutinePromiseVoid;
