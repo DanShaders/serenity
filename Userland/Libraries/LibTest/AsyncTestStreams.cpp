@@ -9,11 +9,10 @@
 
 namespace Test {
 
-static auto s_deferred_context = Core::DeferredInvocationContext::construct();
-
 struct Spinner {
-    Spinner(std::coroutine_handle<>& awaiter)
+    Spinner(std::coroutine_handle<>& awaiter, NonnullRefPtr<Core::DeferredInvocationContext> const& context)
         : m_awaiter(awaiter)
+        , m_context(context)
     {
         VERIFY(!m_awaiter);
     }
@@ -24,8 +23,8 @@ struct Spinner {
     {
         m_awaiter = awaiter;
         Core::ThreadEventQueue::current().post_event(
-            s_deferred_context,
-            make<Core::DeferredInvocationEvent>(s_deferred_context, [&] {
+            m_context,
+            make<Core::DeferredInvocationEvent>(m_context, [&] {
                 m_awaiter.resume();
             }));
     }
@@ -33,6 +32,7 @@ struct Spinner {
     void await_resume() { m_awaiter = {}; }
 
     std::coroutine_handle<>& m_awaiter;
+    NonnullRefPtr<Core::DeferredInvocationContext> m_context;
 };
 
 AsyncMemoryInputStream::AsyncMemoryInputStream(StringView data, StreamCloseExpectation expectation, Vector<size_t>&& chunks)
@@ -51,67 +51,34 @@ AsyncMemoryInputStream::AsyncMemoryInputStream(StringView data, StreamCloseExpec
 
 AsyncMemoryInputStream::~AsyncMemoryInputStream()
 {
-    // 1. Assert that nobody is awaiting on the resource.
-    VERIFY(!m_awaiter);
-
-    // 2. If resource is open, perform Reset AO.
-    if (is_open())
-        reset();
-
-    if (m_expectation == StreamCloseExpectation::Reset) {
-        EXPECT(m_is_reset);
-    } else if (m_expectation == StreamCloseExpectation::Close) {
-        EXPECT(m_is_closed);
-    } else {
-        VERIFY_NOT_REACHED();
-    }
+    VERIFY(m_state != State::Awaiting);
+    cancel();
 }
 
-void AsyncMemoryInputStream::reset()
+void AsyncMemoryInputStream::cancel()
 {
-    // 1. Assert that the resource is open.
-    VERIFY(is_open());
+    if (m_state == State::Reset)
+        return;
+    m_state = State::Reset;
 
-    // 2. Perform Reset AO.
-    //     1. Schedule returning an error (preferably, ECANCELED) from the current resource awaiters.
-    //     2. Ensure that further attempts to wait on a resource will assert.
-    m_is_reset = true;
+    EXPECT(m_expectation == StreamCloseExpectation::Reset);
 
-    //     3. Free synchronously the associated low-level resource.
-
-    //     4. Return synchronously.
+    if (m_awaiter)
+        m_awaiter.resume();
 }
 
 Coroutine<ErrorOr<void>> AsyncMemoryInputStream::close()
 {
-    // 1. Assert that the object is fully constructed.
-    // 2. Assert that the resource is open.
-    VERIFY(is_open());
+    auto _ = guard_method(InternalCall::No);
 
-    // 3. Perform Close AO, await and return its result.
-    //     1. Assert that nobody is awaiting on a resource.
-    VERIFY(!m_awaiter);
-
-    //     3. Shutdown (possibly asynchronously) the associated low-level resource.
-
-    //     4. Check if the state of the resource is clean. If it is not, call Reset AO and return an
-    //        error (preferably, EBUSY).
     if (m_read_head != m_data.length()) {
-        reset();
+        cancel();
         co_return Error::from_errno(EBUSY);
     }
 
-    //     2. Ensure that further attempts to wait on a resource will assert.
-    m_is_closed = true;
-
-    //     5. Free (possibly asynchronously) the associated low-level resource.
-    //     6. Return success.
+    EXPECT(m_expectation == StreamCloseExpectation::Close);
+    m_state = State::Reset;
     co_return {};
-}
-
-bool AsyncMemoryInputStream::is_open() const
-{
-    return !m_is_closed && !m_is_reset;
 }
 
 Coroutine<ErrorOr<bool>> AsyncMemoryInputStream::enqueue_some(Badge<AsyncInputStream>)
@@ -121,8 +88,12 @@ Coroutine<ErrorOr<bool>> AsyncMemoryInputStream::enqueue_some(Badge<AsyncInputSt
         co_return false;
     }
 
-    co_await Spinner { m_awaiter };
-    if (m_is_reset)
+    {
+        auto context = Core::DeferredInvocationContext::construct();
+        co_await Spinner { m_awaiter, context };
+    }
+
+    if (m_state == State::Reset)
         co_return Error::from_errno(ECANCELED);
 
     m_last_enqueue = m_peek_head;
@@ -148,39 +119,31 @@ AsyncMemoryOutputStream::AsyncMemoryOutputStream(StreamCloseExpectation expectat
 
 AsyncMemoryOutputStream::~AsyncMemoryOutputStream()
 {
-    if (is_open())
-        reset();
-
-    if (m_expectation == StreamCloseExpectation::Reset) {
-        EXPECT(m_is_reset);
-    } else if (m_expectation == StreamCloseExpectation::Close) {
-        EXPECT(m_is_closed);
-    } else {
-        VERIFY_NOT_REACHED();
-    }
+    VERIFY(m_state != State::Awaiting);
+    cancel();
 }
 
-void AsyncMemoryOutputStream::reset()
+void AsyncMemoryOutputStream::cancel()
 {
-    VERIFY(is_open());
-    m_is_reset = true;
+    if (m_state == State::Reset)
+        return;
+    m_state = State::Reset;
+
+    EXPECT(m_expectation == StreamCloseExpectation::Reset);
 }
 
 Coroutine<ErrorOr<void>> AsyncMemoryOutputStream::close()
 {
-    VERIFY(is_open());
-    m_is_closed = true;
-    co_return {};
-}
+    auto _ = guard_method(InternalCall::No);
 
-bool AsyncMemoryOutputStream::is_open() const
-{
-    return !m_is_closed && !m_is_reset;
+    EXPECT(m_expectation == StreamCloseExpectation::Close);
+    m_state = State::Reset;
+    co_return {};
 }
 
 Coroutine<ErrorOr<size_t>> AsyncMemoryOutputStream::write_some(ReadonlyBytes data)
 {
-    VERIFY(is_open());
+    auto _ = guard_method(InternalCall::No);
     m_buffer.append(data);
     co_return data.size();
 }

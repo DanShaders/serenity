@@ -57,17 +57,13 @@ Coroutine<ErrorOr<StatusCodeAndHeaders>> receive_response_headers(AsyncInputStre
     auto status_line = CO_TRY(co_await AsyncStreamHelpers::consume_until(stream, "\r\n"sv));
 
     GenericLexer status_lexer { StringView { status_line } };
-    if (!status_lexer.next_is("HTTP/1.1 ")) {
-        stream.reset();
+    if (!status_lexer.next_is("HTTP/1.1 "))
         co_return Error::from_string_literal("HTTP-version must be 'HTTP/1.1'");
-    }
     status_lexer.consume(9);
 
     auto status_code = status_lexer.consume_decimal_integer<u16>();
-    if (status_code.is_error()) {
-        stream.reset();
+    if (status_code.is_error())
         co_return Error::from_string_literal("Invalid HTTP status code");
-    }
 
     Vector<Header> headers;
     while (true) {
@@ -76,10 +72,8 @@ Coroutine<ErrorOr<StatusCodeAndHeaders>> receive_response_headers(AsyncInputStre
             break;
 
         auto colon_position = header.find(':');
-        if (!colon_position.has_value()) {
-            stream.reset();
+        if (!colon_position.has_value())
             co_return Error::from_string_literal("':' must be present in a header line");
-        }
 
         headers.append({
             .header = header.substring_view(0, colon_position.value()),
@@ -119,11 +113,11 @@ private:
             auto lexer = GenericLexer { line };
             auto length_or_error = lexer.consume_decimal_integer<size_t>();
             if (length_or_error.is_error()) {
-                m_stream->reset();
+                m_stream->cancel();
                 co_return Error::from_string_literal("Invalid chunk length");
             }
             if (!lexer.consume_specific("\r\n")) {
-                m_stream->reset();
+                m_stream->cancel();
                 co_return Error::from_string_literal("Expected \\r\\n after chunk length");
             }
             VERIFY(lexer.is_eof());
@@ -141,7 +135,7 @@ private:
             }
 
             if (CO_TRY(co_await m_stream->read(2)) != "\r\n"sv.bytes()) {
-                m_stream->reset();
+                m_stream->cancel();
                 co_return Error::from_string_literal("Expected \\r\\n after a chunk");
             }
 
@@ -157,23 +151,16 @@ private:
 
 Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> Http11Response::create(Badge<Http11Connection>, RequestData&& data, AsyncConnection<>& connection)
 {
-    {
-        ArmedScopeGuard input_resetter = [&] { connection.input->reset(); };
-
-        auto header = format_request(data);
-        if (data.body.has<Empty>()) {
-            CO_TRY(co_await connection.output->write({ { header } }));
-        } else if (data.body.has<RequestData::PlainBody>()) {
-            auto& body = data.body.get<RequestData::PlainBody>().data;
-            CO_TRY(co_await connection.output->write({ { header, body.bytes() } }));
-        } else {
-            VERIFY_NOT_REACHED();
-        }
-
-        input_resetter.disarm();
+    auto header = format_request(data);
+    if (data.body.has<Empty>()) {
+        CO_TRY(co_await connection.output->write({ { header } }));
+    } else if (data.body.has<RequestData::PlainBody>()) {
+        auto& body = data.body.get<RequestData::PlainBody>().data;
+        CO_TRY(co_await connection.output->write({ { header, body.bytes() } }));
+    } else {
+        VERIFY_NOT_REACHED();
     }
 
-    ArmedScopeGuard output_resetter = [&] { connection.output->reset(); };
     auto [status_code, headers] = CO_TRY(co_await receive_response_headers(*connection.input));
 
     Optional<size_t> content_length;
@@ -188,20 +175,16 @@ Coroutine<ErrorOr<NonnullOwnPtr<Http11Response>>> Http11Response::create(Badge<H
 
     OwnPtr<AsyncInputStream> body;
     if (transfer_encoding.has_value()) {
-        if (transfer_encoding.value() != "chunked"sv) {
-            connection.input->reset();
+        if (transfer_encoding.value() != "chunked"sv)
             co_return Error::from_string_literal("Unsupported 'Transfer-Encoding'");
-        }
+
         body = make<ChunkedBodyStream>(*connection.input);
     } else {
-        if (!content_length.has_value()) {
-            connection.input->reset();
+        if (!content_length.has_value())
             co_return Error::from_string_literal("'Content-Length' must be provided");
-        }
+
         body = make<AsyncInputStreamSlice>(*connection.input, content_length.value());
     }
-
-    output_resetter.disarm();
 
     co_return adopt_own(*new (nothrow) Http11Response(body.release_nonnull(), status_code, move(headers)));
 }

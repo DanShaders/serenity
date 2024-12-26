@@ -28,75 +28,33 @@ public:
 
     HybridInputStream() = default;
 
+    virtual void cancel() = 0;
+
     ReadonlyBytes buffered_data() const
     {
-        VERIFY(this->is_open());
+        VERIFY(this->is_unlocked());
         return buffered_data_unchecked({});
     }
 
     WrapIntoCoroutine<paradigm, ErrorOr<PeekOrEofResult>> peek_or_eof()
     {
-        return [](auto& self) -> CoroutineFacade<paradigm, ErrorOr<PeekOrEofResult>> {
-            VERIFY(self.is_open());
-
-            if (!self.m_is_reading_peek) {
-                self.m_is_reading_peek = true;
-                auto data = self.buffered_data_unchecked({});
-                if (!data.is_empty())
-                    co_return PeekOrEofResult { data, false };
-            }
-
-            bool is_not_eof = CO_TRY(co_await self.enqueue_some({}));
-            co_return PeekOrEofResult { self.buffered_data_unchecked({}), !is_not_eof };
-        }(*this);
+        return peek_or_eof(InternalCall::No);
     }
 
     WrapIntoCoroutine<paradigm, ErrorOr<ReadonlyBytes>> peek()
     {
-        return [](auto& self) -> CoroutineFacade<paradigm, ErrorOr<ReadonlyBytes>> {
-            auto [data, is_eof] = CO_TRY(co_await self.peek_or_eof());
-            if (is_eof) {
-                self.reset();
-                co_return Error::from_errno(EIO);
-            }
-            co_return data;
-        }(*this);
+        return peek(InternalCall::No);
     }
 
     WrapIntoCoroutine<paradigm, ErrorOr<ReadonlyBytes>> read(size_t bytes)
     {
-        return [](auto& self, size_t bytes) -> CoroutineFacade<paradigm, ErrorOr<ReadonlyBytes>> {
-            self.m_is_reading_peek = false;
-
-            if (bytes) {
-                auto buffer = self.buffered_data();
-                while (buffer.size() < bytes) {
-                    if (!CO_TRY(co_await self.enqueue_some({}))) {
-                        self.reset();
-                        co_return Error::from_errno(EIO);
-                    }
-                    buffer = self.buffered_data_unchecked({});
-                }
-                self.dequeue({}, bytes);
-                co_return buffer.slice(0, bytes);
-            } else {
-                co_return Bytes {};
-            }
-        }(*this, bytes);
+        return read(InternalCall::No, bytes);
     }
 
     template<typename T>
     WrapIntoCoroutine<paradigm, ErrorOr<T>> read_object()
     {
-        return [](auto& self) -> CoroutineFacade<paradigm, ErrorOr<T>> {
-            auto bytes = CO_TRY(co_await self.read(sizeof(T)));
-            union {
-                T object;
-                char representation[sizeof(T)];
-            } reinterpreter = {};
-            memcpy(&reinterpreter, bytes.data(), sizeof(T));
-            co_return reinterpreter.object;
-        }(*this);
+        return read_object(InternalCall::No);
     }
 
     // If EOF has not been reached, `enqueue_some` should read at least one byte from the underlying
@@ -120,9 +78,75 @@ public:
     virtual void dequeue(Badge<HybridInputStream>, size_t bytes) = 0;
 
 protected:
+    using InternalCall = HybridResource<paradigm>::InternalCall;
+
     static Badge<HybridInputStream> badge() { return {}; }
 
     bool m_is_reading_peek { false };
+
+private:
+    CoroutineFacade<paradigm, ErrorOr<PeekOrEofResult>> peek_or_eof(InternalCall is_internal_call)
+    {
+        auto _ = this->guard_method(is_internal_call);
+
+        if (!m_is_reading_peek) {
+            m_is_reading_peek = true;
+            auto data = buffered_data_unchecked({});
+            if (!data.is_empty())
+                co_return PeekOrEofResult { data, false };
+        }
+
+        bool is_not_eof = CO_TRY(co_await enqueue_some({}));
+        co_return PeekOrEofResult { buffered_data_unchecked({}), !is_not_eof };
+    }
+
+    CoroutineFacade<paradigm, ErrorOr<ReadonlyBytes>> peek(InternalCall is_internal_call)
+    {
+        auto _ = this->guard_method(is_internal_call);
+
+        auto [data, is_eof] = CO_TRY(co_await peek_or_eof(InternalCall::Yes));
+        if (is_eof) {
+            this->cancel();
+            co_return Error::from_errno(EIO);
+        }
+        co_return data;
+    }
+
+    CoroutineFacade<paradigm, ErrorOr<ReadonlyBytes>> read(InternalCall is_internal_call, size_t bytes)
+    {
+        auto _ = this->guard_method(is_internal_call);
+
+        m_is_reading_peek = false;
+
+        if (bytes) {
+            auto buffer = buffered_data_unchecked({});
+            while (buffer.size() < bytes) {
+                if (!CO_TRY(co_await enqueue_some({}))) {
+                    this->cancel();
+                    co_return Error::from_errno(EIO);
+                }
+                buffer = buffered_data_unchecked({});
+            }
+            dequeue({}, bytes);
+            co_return buffer.slice(0, bytes);
+        } else {
+            co_return Bytes {};
+        }
+    }
+
+    template<typename T>
+    CoroutineFacade<paradigm, ErrorOr<T>> read_object(InternalCall is_internal_call)
+    {
+        auto _ = this->guard_method(is_internal_call);
+
+        auto bytes = CO_TRY(co_await read(InternalCall::Yes, sizeof(T)));
+        union {
+            T object;
+            char representation[sizeof(T)];
+        } reinterpreter = {};
+        memcpy(&reinterpreter, bytes.data(), sizeof(T));
+        co_return reinterpreter.object;
+    }
 };
 
 using AsyncInputStream = HybridInputStream<Paradigm::Async>;
@@ -132,6 +156,8 @@ template<Paradigm paradigm>
 class HybridOutputStream : public virtual HybridResource<paradigm> {
 public:
     HybridOutputStream() = default;
+
+    virtual void cancel() = 0;
 
     virtual WrapIntoCoroutine<paradigm, ErrorOr<size_t>> write_some(ReadonlyBytes buffer) = 0;
 

@@ -80,8 +80,9 @@ ASYNC_TEST_CASE(unit_tests_single)
                 .url = test.url,
                 .headers = test.headers,
             },
-            [&](HTTP::Http11Response& response) -> Coroutine<ErrorOr<void>> {
-                auto body = CO_TRY(co_await Test::read_until_eof(response.body()));
+            [&](NonnullOwnPtr<HTTP::Http11Response> response) -> Coroutine<ErrorOr<void>> {
+                auto body = CO_TRY(co_await Test::read_until_eof(*response->body));
+                CO_TRY(co_await response->body->close());
                 EXPECT_EQ(StringView { body }, test.body_expectation);
                 co_return {};
             }));

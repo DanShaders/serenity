@@ -119,7 +119,7 @@ ASYNC_TEST_CASE(input_unexpected_operations)
 
     {
         Test::AsyncMemoryInputStream stream("hello"sv, Test::StreamCloseExpectation::Reset, { 1, 1, 1, 1, 1 });
-        stream.reset();
+        stream.cancel();
     }
     VERIFY(Test::current_test_result() == Test::TestResult::NotRun);
 }
@@ -131,7 +131,7 @@ ASYNC_TEST_CASE(input_reset_during_wait)
     auto read_coro = stream.read(5);
     EXPECT(!read_coro.await_ready());
 
-    stream.reset();
+    stream.cancel();
 
     auto error = co_await read_coro;
     EXPECT_EQ(error.error().code(), ECANCELED);

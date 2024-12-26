@@ -13,7 +13,7 @@
 
 namespace AK {
 
-template<typename T>
+template<DerivedFrom<AsyncInputStream> T>
 class AsyncStreamTransform : public AsyncInputStream {
 public:
     AsyncStreamTransform(MaybeOwned<T>&& stream, AK::Generator<Empty, ErrorOr<void>>&& generator)
@@ -24,62 +24,54 @@ public:
 
     ~AsyncStreamTransform()
     {
-        // 1. Assert that nobody is awaiting on the resource.
-        VERIFY(!m_generator_has_awaiters);
-
-        // 2. If resource is open, perform Reset AO.
-        if (is_open())
-            reset();
+        VERIFY(m_state != State::Awaiting);
+        cancel();
     }
 
-    void reset() override
+    virtual void cancel() override
     {
-        VERIFY(is_open());
-        m_stream->reset();
-        if (!m_generator_has_awaiters)
+        if (m_state == State::Reset)
+            return;
+        m_state = State::Reset;
+
+        m_stream->cancel();
+        if (!m_generator.is_done())
             m_generator.destroy();
-        m_is_open = false;
     }
 
     Coroutine<ErrorOr<void>> close() override
     {
-        VERIFY(is_open());
-        TemporaryChange await_guard(m_generator_has_awaiters, true);
+        auto _ = guard_method(InternalCall::No);
 
-        if (!m_generator.is_done()) {
-            Variant<Empty, ErrorOr<void>> chunk_or_eof = co_await m_generator.next();
-            if (chunk_or_eof.has<Empty>()) {
-                reset();
-                co_return Error::from_errno(EBUSY);
-            } else {
-                m_is_open = false;
-                auto& error_or_eof = chunk_or_eof.get<ErrorOr<void>>();
-                if (error_or_eof.is_error()) {
-                    co_return error_or_eof.release_error();
-                } else {
-                    if (m_stream.is_owned())
-                        CO_TRY(co_await m_stream->close());
-                    co_return {};
-                }
-            }
-        } else {
-            m_is_open = false;
+        if (m_generator.is_done()) {
+            m_state = State::Reset;
             if (m_stream.is_owned())
                 CO_TRY(co_await m_stream->close());
             co_return {};
         }
-    }
 
-    bool is_open() const override
-    {
-        return m_is_open;
+        Variant<Empty, ErrorOr<void>> chunk_or_eof = co_await m_generator.next();
+
+        if (chunk_or_eof.has<Empty>()) {
+            cancel();
+            co_return Error::from_errno(EBUSY);
+        }
+
+        m_state = State::Reset;
+
+        auto& error_or_eof = chunk_or_eof.get<ErrorOr<void>>();
+        if (error_or_eof.is_error()) {
+            VERIFY(!m_stream->is_open());
+            co_return error_or_eof.release_error();
+        }
+
+        if (m_stream.is_owned())
+            CO_TRY(co_await m_stream->close());
+        co_return {};
     }
 
     Coroutine<ErrorOr<bool>> enqueue_some(Badge<AsyncInputStream>) override
     {
-        VERIFY(is_open());
-        TemporaryChange await_guard(m_generator_has_awaiters, true);
-
         if (m_generator.is_done())
             co_return false;
 
@@ -89,7 +81,8 @@ public:
         } else {
             auto& error_or_eof = chunk_or_eof.get<ErrorOr<void>>();
             if (error_or_eof.is_error()) {
-                m_is_open = false;
+                m_state = State::Reset;
+                VERIFY(!m_stream->is_open());
                 co_return error_or_eof.release_error();
             } else {
                 co_return false;
@@ -104,8 +97,6 @@ protected:
 
 private:
     Generator m_generator;
-    bool m_is_open { true };
-    bool m_generator_has_awaiters { false };
 };
 
 }

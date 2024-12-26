@@ -40,43 +40,42 @@ public:
 
     ~AsyncInputStreamSlice()
     {
-        if (is_open())
-            reset();
+        VERIFY(m_state != State::Awaiting);
+        cancel();
     }
 
-    void reset() override
+    virtual void cancel() override
     {
-        VERIFY(is_open());
-        m_stream.reset();
-        m_is_open = false;
+        if (m_state == State::Reset)
+            return;
+        m_state = State::Reset;
+
+        m_stream.cancel();
     }
 
     Coroutine<ErrorOr<void>> close() override
     {
-        VERIFY(is_open());
+        auto _ = guard_method(InternalCall::No);
+
         if (m_length != 0) {
-            reset();
+            cancel();
             co_return Error::from_errno(EBUSY);
         }
-        m_is_open = false;
+
+        m_state = State::Reset;
         co_return {};
     }
 
-    bool is_open() const override
-    {
-        return m_is_open;
-    }
-
-    Coroutine<ErrorOr<bool>> enqueue_some(Badge<AsyncInputStream>) override
+    virtual Coroutine<ErrorOr<bool>> enqueue_some(Badge<AsyncInputStream>) override
     {
         if (m_encountered_eof)
             co_return false;
         auto eof_or_error = co_await m_stream.enqueue_some(badge());
         if (eof_or_error.is_error()) {
-            m_is_open = false;
+            m_state = State::Reset;
             co_return eof_or_error.release_error();
         } else if (!eof_or_error.release_value()) {
-            reset();
+            cancel();
             co_return Error::from_errno(EIO);
         }
         if (m_stream.buffered_data_unchecked(badge()).size() >= m_length)
@@ -84,13 +83,13 @@ public:
         co_return true;
     }
 
-    ReadonlyBytes buffered_data_unchecked(Badge<AsyncInputStream>) const override
+    virtual ReadonlyBytes buffered_data_unchecked(Badge<AsyncInputStream>) const override
     {
         auto data = m_stream.buffered_data_unchecked(badge());
         return data.slice(0, min(data.size(), m_length));
     }
 
-    void dequeue(Badge<AsyncInputStream>, size_t bytes) override
+    virtual void dequeue(Badge<AsyncInputStream>, size_t bytes) override
     {
         m_stream.dequeue(badge(), bytes);
         m_length -= bytes;

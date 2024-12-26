@@ -34,7 +34,7 @@ struct SyncStreamAsyncWrapper final : public AsyncInputStream {
     {
     }
 
-    virtual void reset() override
+    virtual void cancel() override
     {
     }
 
@@ -43,11 +43,6 @@ struct SyncStreamAsyncWrapper final : public AsyncInputStream {
         if (m_stream->is_open())
             m_stream->close();
         co_return {};
-    }
-
-    virtual bool is_open() const override
-    {
-        return !m_stream->is_eof() || !m_buffer.is_empty();
     }
 
     virtual Coroutine<ErrorOr<bool>> enqueue_some(Badge<AsyncInputStream>) override
